@@ -501,9 +501,6 @@ int fts_gesture_suspend(struct fts_ts_data *ts_data)
 
 	FTS_FUNC_ENTER();
 
-	if (enable_irq_wake(ts_data->irq))
-		FTS_DEBUG("enable_irq_wake(irq:%d) fail", ts_data->irq);
-
 	for (i = 0; i < GESTURE_RETRY_COUNT; i++) {
 		ret = fts_gesture_write_mask();
 		if (ret < 0) {
@@ -537,12 +534,31 @@ int fts_gesture_suspend(struct fts_ts_data *ts_data)
 		goto out;
 	}
 
+	if (!ts_data->irq_wake_enabled) {
+		if (enable_irq_wake(ts_data->irq))
+			FTS_DEBUG("enable_irq_wake(irq:%d) fail", ts_data->irq);
+		else
+			ts_data->irq_wake_enabled = true;
+	}
+
 	FTS_INFO("gesture suspend: successfully");
 	ret = 0;
 
 out:
 	FTS_FUNC_EXIT();
 	return ret;
+}
+
+/* Disables wake-up capability on the touch IRQ if it is currently armed. */
+static void fts_gesture_disable_irq_wake(struct fts_ts_data *ts_data)
+{
+	if (!ts_data->irq_wake_enabled)
+		return;
+
+	if (disable_irq_wake(ts_data->irq))
+		FTS_DEBUG("disable_irq_wake(irq:%d) fail", ts_data->irq);
+	else
+		ts_data->irq_wake_enabled = false;
 }
 
 /**
@@ -589,13 +605,12 @@ int fts_gesture_resume(struct fts_ts_data *ts_data)
 		goto out;
 	}
 
-	if (disable_irq_wake(ts_data->irq))
-		FTS_DEBUG("disable_irq_wake(irq:%d) fail", ts_data->irq);
-
 	FTS_INFO("gesture resume: successfully");
 	ret = 0;
 
 out:
+	fts_gesture_disable_irq_wake(ts_data);
+
 	FTS_FUNC_EXIT();
 	return ret;
 }
@@ -696,6 +711,11 @@ int fts_gesture_init(struct fts_ts_data *ts_data)
 int fts_gesture_exit(struct fts_ts_data *ts_data)
 {
 	FTS_FUNC_ENTER();
+	if (!ts_data) {
+		FTS_FUNC_EXIT();
+		return 0;
+	}
+	fts_gesture_disable_irq_wake(ts_data);
 #ifdef CONFIG_TP_COMMON
 	tp_common_remove_ops(TP_FEATURE_DOUBLE_TAP);
 #endif

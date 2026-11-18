@@ -1953,9 +1953,51 @@ static int fts_ts_remove_entry(struct fts_ts_data *ts_data)
 	return 0;
 }
 
+/*
+ * fts_ic_hard_recover - bring back an IC that stopped answering on I2C.
+ *
+ * Tries a plain hardware reset first (3 times). If the IC is still silent
+ * it power-cycles the touch supplies and resets once more.
+ */
+static int fts_ic_hard_recover(struct fts_ts_data *ts_data)
+{
+	int i;
+
+	FTS_ERROR("IC not responding, starting hard recovery");
+
+#if FTS_POWER_SOURCE_CUST_EN
+	if (ts_data->power_disabled)
+		fts_power_source_resume(ts_data);
+#endif
+
+	for (i = 0; i < 3; i++) {
+		fts_reset_proc(200);
+		if (!fts_wait_tp_to_valid(true)) {
+			FTS_INFO("IC recovered by reset (try %d)", i + 1);
+			return 0;
+		}
+	}
+
+#if FTS_POWER_SOURCE_CUST_EN
+	FTS_ERROR("reset did not help, power cycling touch supplies");
+	fts_power_source_suspend(ts_data);
+	msleep(50);
+	fts_power_source_resume(ts_data);
+	fts_reset_proc(200);
+	if (!fts_wait_tp_to_valid(true)) {
+		FTS_INFO("IC recovered by power cycle");
+		return 0;
+	}
+#endif
+
+	FTS_ERROR("IC still not responding after hard recovery");
+	return -EIO;
+}
+
 static int fts_ts_suspend(struct device *dev)
 {
 	struct fts_ts_data *ts_data = dev_get_drvdata(dev);
+	bool power_suspend = true;
 	int ret = 0;
 
 	if (!ts_data) {
@@ -1987,33 +2029,27 @@ static int fts_ts_suspend(struct device *dev)
 #endif
 
 	if (ts_data->gesture_mode || ts_data->aod_changed) {
-		if (!IS_ERR_OR_NULL(ts_data->vcc_i2c)) {
-			ret = regulator_enable(ts_data->vcc_i2c);
-			if (ret)
-				FTS_ERROR("enable vcc_i2c regulator failed, ret=%d", ret);
-		}
-
 		ret = fts_gesture_suspend(ts_data);
 		if (ret < 0) {
-			FTS_ERROR("gesture suspend failed: %d; aborting ts suspend", ret);
+			FTS_ERROR("gesture suspend failed: %d; falling back to power suspend",
+				  ret);
+		} else {
 			fts_irq_enable();
-			return 0;
+			power_suspend = false;
 		}
-
-		fts_irq_enable();
 	} else {
 		FTS_DEBUG("make TP enter into sleep mode");
 		ret = fts_write_reg(FTS_REG_POWER_MODE, FTS_REG_POWER_MODE_SLEEP);
 		if (ret < 0)
 			FTS_ERROR("set TP to sleep mode fail, ret=%d", ret);
+	}
 
-		if (!ts_data->ic_info.is_incell) {
+	if (power_suspend && !ts_data->ic_info.is_incell) {
 #if FTS_POWER_SOURCE_CUST_EN
-			ret = fts_power_source_suspend(ts_data);
-			if (ret < 0)
-				FTS_ERROR("power enter suspend fail: %d", ret);
+		ret = fts_power_source_suspend(ts_data);
+		if (ret < 0)
+			FTS_ERROR("power enter suspend fail: %d", ret);
 #endif
-		}
 	}
 
 	mutex_lock(&ts_data->bus_lock);
@@ -2053,13 +2089,16 @@ static int fts_ts_resume(struct device *dev)
 		fts_reset_proc(200);
 	}
 
+	if (fts_wait_tp_to_valid(true) < 0)
+		fts_ic_hard_recover(ts_data);
+
 	fts_tp_state_recovery(ts_data);
 
 #if FTS_ESDCHECK_EN
 	fts_esdcheck_resume();
 #endif
 
-	if (ts_data->gesture_mode || ts_data->aod_changed) {
+	if (ts_data->gesture_mode || ts_data->aod_changed || ts_data->irq_wake_enabled) {
 		ret = fts_gesture_resume(ts_data);
 		if (ret < 0)
 			FTS_ERROR("gesture resume failed: %d", ret);

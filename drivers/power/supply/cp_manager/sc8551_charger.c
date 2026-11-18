@@ -1295,10 +1295,22 @@ static int sc8551_parse_dt(struct sc8551 *sc, struct device *dev)
 	sc->irq_gpiod = devm_gpiod_get(dev, "intr", GPIOD_IN);
 	if (IS_ERR(sc->irq_gpiod)) {
 		ret = PTR_ERR(sc->irq_gpiod);
-		sc_err("devm_gpiod_get(intr) failed: %d\n", ret);
-		return ret;
+		if (ret == -ENOENT && sc->client && sc->client->irq > 0) {
+			/*
+			 * Older device trees have no "intr-gpios" property but
+			 * still describe the interrupt with "interrupts". Use
+			 * that instead of failing the whole probe.
+			 */
+			sc_info("no intr-gpios in DT, using client irq %d\n",
+				sc->client->irq);
+			sc->irq_gpiod = NULL;
+		} else {
+			sc_err("devm_gpiod_get(intr) failed: %d\n", ret);
+			return ret;
+		}
+	} else {
+		sc_info("intr descriptor acquired\n");
 	}
-	sc_info("intr descriptor acquired\n");
 
 	sc->cfg.bat_ovp_disable = of_property_read_bool(np,
 							"sc,sc8551,bat-ovp-disable");
@@ -2221,7 +2233,6 @@ static int sc8551_charger_probe(struct i2c_client *client,
 	ret = sc8551_parse_dt(sc, sc->dev);
 	if (ret) {
 		pr_err("[sc8551_chg]: %s: parse_dt failed: %d\n", __func__, ret);
-		ret = -EIO;
 		goto err_out;
 	}
 
@@ -2231,10 +2242,10 @@ static int sc8551_charger_probe(struct i2c_client *client,
 		goto err_out;
 	}
 
-	irqn = gpiod_to_irq(sc->irq_gpiod);
+	irqn = sc->irq_gpiod ? gpiod_to_irq(sc->irq_gpiod) : sc->client->irq;
 	if (irqn <= 0) {
-		pr_err("[sc8551_chg]: %s: gpiod_to_irq failed: %d\n", __func__, irqn);
-		ret = irqn;
+		pr_err("[sc8551_chg]: %s: no usable irq: %d\n", __func__, irqn);
+		ret = irqn < 0 ? irqn : -EINVAL;
 		goto err_out;
 	}
 
