@@ -4546,11 +4546,26 @@ int dsi_panel_enable(struct dsi_panel *panel)
 	mutex_lock(&panel->panel_lock);
 
 	rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_ON);
-	if (rc)
+	if (rc) {
 		DSI_ERR("[%s] failed to send DSI_CMD_SET_ON cmds, rc=%d\n",
 		       panel->name, rc);
-	else
+	} else {
+		struct dsi_display_mode *cur_mode = panel->cur_mode;
+		struct dsi_display_mode_priv_info *priv_info;
+
 		panel->panel_initialized = true;
+		priv_info = cur_mode ? cur_mode->priv_info : NULL;
+		if (priv_info && cur_mode->timing.refresh_rate == 90 &&
+		    priv_info->cmd_sets[DSI_CMD_SET_DISP_BC_90HZ].count) {
+			int bc_rc;
+
+			bc_rc = dsi_panel_tx_cmd_set(panel,
+						     DSI_CMD_SET_DISP_BC_90HZ);
+			if (bc_rc)
+				DSI_ERR("[%s] failed to send DSI_CMD_SET_DISP_BC_90HZ cmd, rc=%d\n",
+					panel->name, bc_rc);
+		}
+	}
 	mutex_unlock(&panel->panel_lock);
 
 	if (panel->hbm_mode)
@@ -4641,6 +4656,8 @@ void dsi_panel_set_backlight_control(struct dsi_panel *panel,
 		cmd = DSI_CMD_SET_DISP_BC_90HZ;
 	else if (adj_mode->timing.refresh_rate == 60)
 		cmd = DSI_CMD_SET_DISP_BC_60HZ;
+	else
+		goto out;
 
 	rc = dsi_panel_tx_cmd_set(panel, cmd);
 	if (rc)
