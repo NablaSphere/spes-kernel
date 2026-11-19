@@ -1240,6 +1240,33 @@ static int override_release(char __user *release, size_t len)
 	return ret;
 }
 
+static void fake_bpf_uname(struct new_utsname *tmp)
+{
+	static const char * const bpf_comms[] = {
+		"netbpfload",
+		"netd",
+		"bpfloader",
+	};
+	size_t i;
+
+	BUILD_BUG_ON(sizeof(CONFIG_FAKE_UNAME_RELEASE) > sizeof(tmp->release));
+	if (sizeof(CONFIG_FAKE_UNAME_RELEASE) <= 1)
+		return;
+
+	if (!uid_eq(current_uid(), GLOBAL_ROOT_UID))
+		return;
+
+	for (i = 0; i < ARRAY_SIZE(bpf_comms); i++) {
+		if (!strcmp(current->comm, bpf_comms[i])) {
+			strscpy_pad(tmp->release, CONFIG_FAKE_UNAME_RELEASE,
+				    sizeof(tmp->release));
+			pr_debug("fake uname: %s/%d release=%s\n",
+				 current->comm, current->pid, tmp->release);
+			return;
+		}
+	}
+}
+
 SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
 {
 	struct new_utsname tmp;
@@ -1247,6 +1274,7 @@ SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
 	down_read(&uts_sem);
 	memcpy(&tmp, utsname(), sizeof(tmp));
 	up_read(&uts_sem);
+	fake_bpf_uname(&tmp);
 	if (copy_to_user(name, &tmp, sizeof(tmp)))
 		return -EFAULT;
 
