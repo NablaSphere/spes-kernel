@@ -2145,7 +2145,11 @@ static void ufshcd_ungate_work(struct work_struct *work)
 
 	spin_unlock_irqrestore(hba->host->host_lock, flags);
 	ufshcd_hba_vreg_set_hpm(hba);
-	ufshcd_enable_clocks(hba);
+	ret = ufshcd_enable_clocks(hba);
+	if (ret)
+		goto unblock_reqs;
+
+	ufshcd_enable_irq(hba);
 
 	/* Exit from hibern8 */
 	if (ufshcd_can_hibern8_during_gating(hba)) {
@@ -2319,6 +2323,8 @@ static void ufshcd_gate_work(struct work_struct *work)
 		}
 		ufshcd_set_link_hibern8(hba);
 	}
+
+	ufshcd_disable_irq(hba);
 
 	/*
 	 * If auto hibern8 is enabled then the link will already
