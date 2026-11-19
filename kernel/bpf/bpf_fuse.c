@@ -38,14 +38,14 @@ static bool fuse_prog_is_valid_access(int off, int size,
 
 	if (off < 0 || off > offsetofend(struct fuse_bpf_args, out_args))
 		return false;
+	if (type != BPF_READ)
+		return false;
 
 	/* TODO This is garbage. Do it properly */
 	for (i = 0; i < 5; i++) {
 		if (off == offsetof(struct fuse_bpf_args, in_args[i].value)) {
 			info->reg_type = PTR_TO_RDONLY_BUF;
 			info->ctx_field_size = 256;
-			if (type != BPF_READ)
-				return false;
 			return true;
 		}
 	}
@@ -56,8 +56,6 @@ static bool fuse_prog_is_valid_access(int off, int size,
 			return true;
 		}
 	}
-	if (type != BPF_READ)
-		return false;
 
 	return true;
 }
