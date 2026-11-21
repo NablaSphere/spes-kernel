@@ -3763,7 +3763,7 @@ static int _sde_crtc_vblank_enable_no_lock(
 			return ret;
 
 		drm_for_each_encoder_mask(enc, crtc->dev,
-			crtc->state->encoder_mask) {
+				sde_crtc->cached_encoder_mask) {
 			SDE_EVT32(DRMID(&sde_crtc->base), DRMID(enc), enable,
 					sde_crtc->enabled);
 
@@ -3772,7 +3772,7 @@ static int _sde_crtc_vblank_enable_no_lock(
 		}
 	} else {
 		drm_for_each_encoder_mask(enc, crtc->dev,
-			crtc->state->encoder_mask) {
+				sde_crtc->cached_encoder_mask) {
 			SDE_EVT32(DRMID(&sde_crtc->base), DRMID(enc), enable,
 					sde_crtc->enabled);
 
@@ -4047,12 +4047,15 @@ static void sde_crtc_disable(struct drm_crtc *crtc)
 		sde_crtc->ds_reconfig = true;
 
 	mutex_unlock(&sde_crtc->crtc_lock);
-	_sde_crtc_flush_event_thread(crtc);
+	if (crtc->index < ARRAY_SIZE(priv->event_thread) &&
+	    priv->event_thread[crtc->index].thread)
+		kthread_flush_worker(&priv->event_thread[crtc->index].worker);
 	mutex_lock(&sde_crtc->crtc_lock);
 
-	SDE_EVT32(DRMID(crtc), sde_crtc->enabled,
-			crtc->state->active, crtc->state->enable);
+	SDE_EVT32(DRMID(crtc), sde_crtc->enabled, crtc->state->active,
+		  crtc->state->enable, sde_crtc->cached_encoder_mask);
 	sde_crtc->enabled = false;
+	sde_crtc->cached_encoder_mask = 0;
 
 	/* Try to disable uidle */
 	sde_core_perf_crtc_update_uidle(crtc, false);
@@ -4160,6 +4163,10 @@ static void sde_crtc_enable(struct drm_crtc *crtc,
 	SDE_DEBUG("crtc%d\n", crtc->base.id);
 	SDE_EVT32_VERBOSE(DRMID(crtc));
 	sde_crtc = to_sde_crtc(crtc);
+
+	mutex_lock(&sde_crtc->crtc_lock);
+	sde_crtc->cached_encoder_mask = crtc->state->encoder_mask;
+	mutex_unlock(&sde_crtc->crtc_lock);
 
 	/*
 	 * Avoid drm_crtc_vblank_on during seamless DMS case
@@ -5014,7 +5021,8 @@ int sde_crtc_vblank(struct drm_crtc *crtc, bool en)
 
 	mutex_lock(&sde_crtc->vblank_modeset_ctrl_lock);
 	mutex_lock(&sde_crtc->crtc_lock);
-	SDE_EVT32(DRMID(&sde_crtc->base), en, sde_crtc->enabled);
+	SDE_EVT32(DRMID(&sde_crtc->base), en, sde_crtc->enabled,
+		  sde_crtc->cached_encoder_mask);
 	ret = _sde_crtc_vblank_enable_no_lock(sde_crtc, en);
 	if (ret)
 		SDE_ERROR("%s vblank enable failed: %d\n",
