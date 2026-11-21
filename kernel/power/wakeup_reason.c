@@ -27,6 +27,7 @@
 #include <linux/notifier.h>
 #include <linux/suspend.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 
 /*
  * struct wakeup_irq_node - stores data and relationships for IRQs logged as
@@ -271,27 +272,57 @@ static void print_wakeup_sources(void)
 {
 	struct wakeup_irq_node *n;
 	unsigned long flags;
+	int reason;
+	union {
+		char non_irq_buf[MAX_SUSPEND_ABORT_LEN];
+		struct {
+			int irq;
+			char irq_name[MAX_WAKEUP_REASON_IRQ_NAME_LEN];
+		} irqs[8];
+	} snap;
+	int count = 0;
+	bool truncated = false;
+	int i;
 
 	spin_lock_irqsave(&wakeup_reason_lock, flags);
 
 	capture_reasons = false;
+	reason = wakeup_reason;
 
-	if (wakeup_reason == RESUME_ABORT) {
-		pr_info("Abort: %s\n", non_irq_wake_reason);
-		spin_unlock_irqrestore(&wakeup_reason_lock, flags);
-		return;
+	if (reason == RESUME_ABORT || reason == RESUME_ABNORMAL) {
+		strscpy(snap.non_irq_buf, non_irq_wake_reason,
+			sizeof(snap.non_irq_buf));
+	} else if (reason == RESUME_IRQ) {
+		list_for_each_entry(n, &leaf_irqs, siblings) {
+			if (count < ARRAY_SIZE(snap.irqs)) {
+				snap.irqs[count].irq = n->irq;
+				strscpy(snap.irqs[count].irq_name, n->irq_name,
+					sizeof(snap.irqs[count].irq_name));
+				count++;
+			} else {
+				truncated = true;
+				break;
+			}
+		}
 	}
 
-	if (wakeup_reason == RESUME_IRQ && !list_empty(&leaf_irqs))
-		list_for_each_entry(n, &leaf_irqs, siblings)
-			pr_info("Resume caused by IRQ %d, %s\n", n->irq,
-				n->irq_name);
-	else if (wakeup_reason == RESUME_ABNORMAL)
-		pr_info("Resume caused by %s\n", non_irq_wake_reason);
-	else
-		pr_info("Resume cause unknown\n");
-
 	spin_unlock_irqrestore(&wakeup_reason_lock, flags);
+
+	if (truncated)
+		pr_warn_once("Truncated wakeup IRQ list (exceeded %zu)\n",
+			     ARRAY_SIZE(snap.irqs));
+
+	if (reason == RESUME_ABORT) {
+		pr_info("Abort: %s\n", snap.non_irq_buf);
+	} else if (reason == RESUME_IRQ && count > 0) {
+		for (i = 0; i < count; i++)
+			pr_info("Resume caused by IRQ %d, %s\n",
+				snap.irqs[i].irq, snap.irqs[i].irq_name);
+	} else if (reason == RESUME_ABNORMAL) {
+		pr_info("Resume caused by %s\n", snap.non_irq_buf);
+	} else {
+		pr_info("Resume cause unknown\n");
+	}
 }
 
 static ssize_t last_resume_reason_show(struct kobject *kobj,
