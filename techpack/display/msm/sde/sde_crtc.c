@@ -5872,7 +5872,7 @@ static ssize_t _sde_crtc_misr_setup(struct file *file,
 		return -EINVAL;
 	}
 
-	rc = pm_runtime_get_sync(crtc->dev->dev);
+	rc = pm_runtime_resume_and_get(crtc->dev->dev);
 	if (rc < 0)
 		return rc;
 
@@ -5906,7 +5906,7 @@ static ssize_t _sde_crtc_misr_read(struct file *file,
 	if (!sde_kms)
 		return -EINVAL;
 
-	rc = pm_runtime_get_sync(crtc->dev->dev);
+	rc = pm_runtime_resume_and_get(crtc->dev->dev);
 	if (rc < 0)
 		return rc;
 
@@ -6531,7 +6531,7 @@ static int _sde_crtc_event_enable(struct sde_kms *kms,
 
 	ret = 0;
 	if (crtc_drm->enabled) {
-		ret = pm_runtime_get_sync(crtc_drm->dev->dev);
+		ret = pm_runtime_resume_and_get(crtc_drm->dev->dev);
 		if (ret < 0) {
 			SDE_EVT32(ret, SDE_EVTLOG_ERROR);
 			kfree(node);
@@ -6599,7 +6599,7 @@ static int _sde_crtc_event_disable(struct sde_kms *kms,
 		kfree(node);
 		return 0;
 	}
-	ret = pm_runtime_get_sync(crtc_drm->dev->dev);
+	ret = pm_runtime_resume_and_get(crtc_drm->dev->dev);
 	if (ret < 0) {
 		SDE_ERROR("failed to enable power resource %d\n", ret);
 		SDE_EVT32(ret, SDE_EVTLOG_ERROR);
