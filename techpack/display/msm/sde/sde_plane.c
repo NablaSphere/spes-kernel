@@ -413,7 +413,7 @@ int sde_plane_danger_signal_ctrl(struct drm_plane *plane, bool enable)
 	if (!psde->is_rt_pipe)
 		goto end;
 
-	rc = pm_runtime_get_sync(plane->dev->dev);
+	rc = pm_runtime_resume_and_get(plane->dev->dev);
 	if (rc < 0) {
 		SDE_ERROR("failed to enable power resource %d\n", rc);
 		SDE_EVT32(rc, SDE_EVTLOG_ERROR);
@@ -1982,7 +1982,7 @@ static void sde_plane_cleanup_fb(struct drm_plane *plane,
 			       psde->pipe - SSPP_VIG0);
 
 		/* halt this plane now */
-		ret = pm_runtime_get_sync(plane->dev->dev);
+		ret = pm_runtime_resume_and_get(plane->dev->dev);
 		if (ret < 0) {
 			SDE_ERROR("power resource enable failed with %d", ret);
 			SDE_EVT32(ret, SDE_EVTLOG_ERROR);
