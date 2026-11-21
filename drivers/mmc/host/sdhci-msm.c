@@ -5850,6 +5850,7 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 		pr_err("%s: %s: failed creating auto-cmd21 attr: %d\n",
 		       mmc_hostname(host->mmc), __func__, ret);
 		device_remove_file(&pdev->dev, &msm_host->auto_cmd21_attr);
+		ret = 0;	/* optional attribute */
 	}
 
 	if (msm_host->minor >= 2) {
@@ -5863,6 +5864,7 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 		if (ret) {
 			pr_err("%s: %s: failed creating M&M attr: %d\n",
 					mmc_hostname(host->mmc), __func__, ret);
+			ret = 0;	/* optional attribute */
 		}
 	}
 
