@@ -37,6 +37,8 @@
 #include <linux/spinlock.h>
 #include <linux/uaccess.h>
 #ifdef CONFIG_PSTORE_LAST_KMSG
+#include <linux/mm.h>
+#include <linux/mutex.h>
 #include <linux/proc_fs.h>
 #endif
 
@@ -302,12 +304,23 @@ bool pstore_is_mounted(void)
 
 #ifdef CONFIG_PSTORE_LAST_KMSG
 static char *console_buffer;
-static ssize_t console_bufsize;
+static size_t console_bufsize;
+static DEFINE_MUTEX(last_kmsg_mutex);
 
 static ssize_t last_kmsg_read(struct file *file, char __user *buf,
 			      size_t len, loff_t *offset)
 {
-	return simple_read_from_buffer(buf, len, offset, console_buffer, console_bufsize);
+	ssize_t ret;
+
+	mutex_lock(&last_kmsg_mutex);
+	if (!console_buffer)
+		ret = 0;
+	else
+		ret = simple_read_from_buffer(buf, len, offset,
+					      console_buffer, console_bufsize);
+	mutex_unlock(&last_kmsg_mutex);
+
+	return ret;
 }
 
 static const struct file_operations last_kmsg_fops = {
@@ -424,9 +437,23 @@ int pstore_mkfile(struct dentry *root, struct pstore_record *record)
 	spin_unlock_irqrestore(&allpstore_lock, flags);
 
 #ifdef CONFIG_PSTORE_LAST_KMSG
+	/*
+	 * Copy the console record so /proc/last_kmsg owns its buffer; the
+	 * inode's record is freed when its dentry is evicted.
+	 */
 	if (record->type == PSTORE_TYPE_CONSOLE) {
-		console_buffer = record->buf;
-		console_bufsize = size;
+		char *buf = NULL;
+
+		if (size) {
+			buf = kvmalloc(size, GFP_KERNEL);
+			if (buf)
+				memcpy(buf, record->buf, size);
+		}
+		mutex_lock(&last_kmsg_mutex);
+		kvfree(console_buffer);
+		console_buffer = buf;
+		console_bufsize = buf ? size : 0;
+		mutex_unlock(&last_kmsg_mutex);
 	}
 #endif
 
@@ -515,9 +542,6 @@ static struct file_system_type pstore_fs_type = {
 int __init pstore_init_fs(void)
 {
 	int err;
-#ifdef CONFIG_PSTORE_LAST_KMSG
-	struct proc_dir_entry *last_kmsg_entry = NULL;
-#endif
 
 	/* Create a convenient mount point for people to access pstore */
 	err = sysfs_create_mount_point(fs_kobj, "pstore");
@@ -526,20 +550,31 @@ int __init pstore_init_fs(void)
 
 	err = register_filesystem(&pstore_fs_type);
 	if (err < 0)
-		sysfs_remove_mount_point(fs_kobj, "pstore");
+		goto out_remove_mount;
 
 #ifdef CONFIG_PSTORE_LAST_KMSG
-	last_kmsg_entry = proc_create_data("last_kmsg", S_IFREG | S_IRUGO, NULL, &last_kmsg_fops, NULL);
-	if (!last_kmsg_entry)
+	if (!proc_create("last_kmsg", 0444, NULL, &last_kmsg_fops))
 		pr_err("Failed to create last_kmsg\n");
 #endif
 
+	return 0;
+
+out_remove_mount:
+	sysfs_remove_mount_point(fs_kobj, "pstore");
 out:
 	return err;
 }
 
 void __exit pstore_exit_fs(void)
 {
+#ifdef CONFIG_PSTORE_LAST_KMSG
+	remove_proc_entry("last_kmsg", NULL);
+	mutex_lock(&last_kmsg_mutex);
+	kvfree(console_buffer);
+	console_buffer = NULL;
+	console_bufsize = 0;
+	mutex_unlock(&last_kmsg_mutex);
+#endif
 	unregister_filesystem(&pstore_fs_type);
 	sysfs_remove_mount_point(fs_kobj, "pstore");
 }
