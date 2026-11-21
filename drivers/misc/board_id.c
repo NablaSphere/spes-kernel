@@ -1,98 +1,73 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- *
  * Copyright (C) 2019 wanghan <wanghan@longcheer.com>
- *
  */
 
+#define pr_fmt(fmt) "board_id: " fmt
+
+#include <linux/cache.h>
+#include <linux/export.h>
 #include <linux/init.h>
-#include <linux/module.h>
-#include <linux/device.h>
-#include <linux/errno.h>
-#include <linux/slab.h>
+#include <linux/kernel.h>
 #include <linux/string.h>
 
+#include "board_id.h"
+
 /*
+ * The board identifiers are parsed once from the kernel command line during
+ * start_kernel() and never change afterwards.  They are stored in
+ * __ro_after_init memory so an accidental late write faults instead of
+ * silently changing what the board reports.
  *
- * String :
- *     'androidboot.board.new_version='
- * Format :
- *     'androidboot.board.new_version=<number>'
- * Example :
- *     androidboot.board.new_version=0
- *     androidboot.board.new_version=1
-)
- *******************************************************************
+ * Parsing is all-or-nothing: a value is only published once the whole
+ * parameter has been validated, so a malformed command line leaves the
+ * zero-initialised default in place instead of a partially parsed result.
+ * The setup handlers always return 1: the parameter is known to this driver,
+ * even when its value is rejected, so the kernel must not report it as an
+ * unknown boot option.
  */
-#if defined(CONFIG_TARGET_PROJECT_K7B)
-static int board_new_version;
-
-int get_board_new_version(void)
-{
-	return board_new_version;
-}
-EXPORT_SYMBOL(get_board_new_version);
-
-static int __init setup_board_new_version(char *str)
-{
-	int ret;
-
-	ret = kstrtoint(str, 10, &board_new_version);
-	if (ret) {
-		pr_err("%s: failed to parse '%s': %d\n", __func__, str, ret);
-		return 0;
-	}
-	pr_info("board_id_hwlevel: %d\n", board_new_version);
-	return 1;
-}
-__setup("androidboot.board.new_version=", setup_board_new_version);
-#endif
 
 /*
- *
- * String :
- *     'androidboot.hwname='
- * Format :
- *     'androidboot.hwname=<string>'
- * Example :
+ * String: 'androidboot.hwname='
+ * Format: 'androidboot.hwname=<string>'
+ * Example:
  *     androidboot.hwname=secret
  *     androidboot.hwname=rosemary
  *     androidboot.hwname=maltose
- *******************************************************************
  */
-static char board_id_hwname[32] = {0};
+static char board_id_hwname[BOARD_ID_HWNAME_MAX] __ro_after_init;
 
 void board_id_get_hwname(char *str)
 {
-	if (IS_ERR_OR_NULL(str))
+	if (!str)
 		return;
+
 	strscpy(str, board_id_hwname, sizeof(board_id_hwname));
 }
 EXPORT_SYMBOL(board_id_get_hwname);
 
 static int __init setup_board_id_hwname(char *str)
 {
-	strscpy(board_id_hwname, str, sizeof(board_id_hwname));
+	if (strscpy(board_id_hwname, str, sizeof(board_id_hwname)) < 0)
+		pr_warn("hwname '%s' truncated to %zu bytes\n",
+			str, sizeof(board_id_hwname) - 1);
+
 	pr_info("board_id_hwname: %s\n", board_id_hwname);
 	return 1;
 }
 __setup("androidboot.hwname=", setup_board_id_hwname);
 
 /*
- *
- * String :
- *     'androidboot.hwversion='
- * Format :
- *     'androidboot.hwversion=<number/string>'
- * Example :
+ * String: 'androidboot.hwlevel='
+ * Format: 'androidboot.hwlevel=<number/string>'
+ * Example:
  *     androidboot.hwlevel=0
  *     androidboot.hwlevel=1
  *     androidboot.hwlevel=2
  *     androidboot.hwlevel=MP (9)
- *******************************************************************
  */
+static int board_id_hwlevel __ro_after_init;
 
-static int board_id_hwlevel;
 int board_id_get_hwlevel(void)
 {
 	return board_id_hwlevel;
@@ -101,42 +76,39 @@ EXPORT_SYMBOL(board_id_get_hwlevel);
 
 static int __init setup_board_id_hwlevel(char *str)
 {
-	int ret;
+	int val;
 
 	if (!strcmp("MP", str)) {
-		board_id_hwlevel = 9;
+		board_id_hwlevel = BOARD_ID_HWLEVEL_MP;
 		pr_info("board_id_hwlevel: %d (MP)\n", board_id_hwlevel);
 		return 1;
 	}
-	ret = kstrtoint(str, 10, &board_id_hwlevel);
-	if (ret) {
-		pr_err("%s: failed to parse '%s': %d\n", __func__, str, ret);
-		return 0;
+
+	if (kstrtoint(str, 10, &val) || val < 0) {
+		pr_err("invalid hwlevel '%s'\n", str);
+		return 1;
 	}
+
+	board_id_hwlevel = val;
 	pr_info("board_id_hwlevel: %d\n", board_id_hwlevel);
 	return 1;
 }
 __setup("androidboot.hwlevel=", setup_board_id_hwlevel);
 
 /*
- *
- * String :
- *     'androidboot.hwversion='
- * Format :
- *     xx.xx.xx < product_number . major_number . minor_number >
- * Example :
+ * String: 'androidboot.hwversion='
+ * Format: xx.xx.xx < product_number . major_number . minor_number >
+ * Example:
  *     androidboot.hwversion=xx.xx.xx // product  , major, minor
  *     androidboot.hwversion=1.10.0   // secret   , 13   , 0
  *     androidboot.hwversion=1.20.0   // secret   , 0    , 0
  *     androidboot.hwversion=1.30.0   // secret   , 10   , 0
  *     androidboot.hwversion=2.10.0   // rosemary , 20   , 0
  *     androidboot.hwversion=3.10.0   // maltose  , 90   , 0
- *******************************************************************
  */
-
-static int board_id_hwversion_product_num;
-static int board_id_hwversion_major_num;
-static int board_id_hwversion_minor_num;
+static int board_id_hwversion_product_num __ro_after_init;
+static int board_id_hwversion_major_num __ro_after_init;
+static int board_id_hwversion_minor_num __ro_after_init;
 
 int board_id_get_hwversion_product_num(void)
 {
@@ -158,37 +130,44 @@ EXPORT_SYMBOL(board_id_get_hwversion_minor_num);
 
 static int __init setup_board_id_hwversion(char *str)
 {
-	char *str_p = NULL;
-	char *str_n = NULL;
-	char buf[32] = {0};
-	int ret;
+	char buf[32];
+	char *cursor = buf;
+	char *token;
+	int vals[3];
+	size_t i;
 
-	strscpy(buf, str, sizeof(buf));
-	str_n = buf;
+	/*
+	 * Parse a private copy: strsep() modifies its input and the original
+	 * string is still needed for the error message.
+	 */
+	if (strscpy(buf, str, sizeof(buf)) < 0)
+		goto invalid;
 
-	str_p = strsep(&str_n, ".");
-	ret = kstrtoint(str_p, 10, &board_id_hwversion_product_num);
-	if (ret) {
-		pr_err("%s: failed to parse product_num '%s': %d\n", __func__, str_p, ret);
-		return 0;
+	for (i = 0; i < ARRAY_SIZE(vals); i++) {
+		token = strsep(&cursor, ".");
+		if (!token || kstrtoint(token, 10, &vals[i]) || vals[i] < 0)
+			goto invalid;
 	}
 
-	str_p = strsep(&str_n, ".");
-	ret = kstrtoint(str_p, 10, &board_id_hwversion_major_num);
-	if (ret) {
-		pr_err("%s: failed to parse major_num '%s': %d\n", __func__, str_p, ret);
-		return 0;
-	}
+	/* Reject trailing components such as '1.2.3.4'. */
+	if (cursor)
+		goto invalid;
 
-	ret = kstrtoint(str_n, 10, &board_id_hwversion_minor_num);
-	if (ret) {
-		pr_err("%s: failed to parse minor_num '%s': %d\n", __func__, str_n, ret);
-		return 0;
-	}
+	board_id_hwversion_product_num = vals[0];
+	board_id_hwversion_major_num = vals[1];
+	board_id_hwversion_minor_num = vals[2];
 
-	pr_info("board_id_hwversion_product_num: %d\n", board_id_hwversion_product_num);
-	pr_info("board_id_hwversion_major_num: %d\n", board_id_hwversion_major_num);
-	pr_info("board_id_hwversion_minor_num: %d\n", board_id_hwversion_minor_num);
+	pr_info("board_id_hwversion_product_num: %d\n",
+		board_id_hwversion_product_num);
+	pr_info("board_id_hwversion_major_num: %d\n",
+		board_id_hwversion_major_num);
+	pr_info("board_id_hwversion_minor_num: %d\n",
+		board_id_hwversion_minor_num);
+	return 1;
+
+invalid:
+	pr_err("invalid hwversion '%s', expected <product>.<major>.<minor>\n",
+	       str);
 	return 1;
 }
 __setup("androidboot.hwversion=", setup_board_id_hwversion);
