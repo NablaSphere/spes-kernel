@@ -1,0 +1,33 @@
+#ifndef __KSU_H_THRONE_TRACKER
+#define __KSU_H_THRONE_TRACKER
+
+#define TRACK_THRONE_PRUNE_ONLY (1 << 0)
+#define TRACK_THRONE_FROM_RENAMEAT (1 << 1)
+#define TRACK_THRONE_FORCE_SYNCHRONOUS (1 << 2)
+
+struct dentry;
+
+#ifdef CONFIG_KSU_DISABLE_MANAGER
+static inline void ksu_throne_tracker_init(void)
+{
+}
+
+static inline void ksu_throne_tracker_exit(void)
+{
+}
+
+static inline void track_throne(unsigned int flags)
+{
+}
+
+static inline void ksu_handle_rename(struct dentry *old_dentry, struct dentry *new_dentry)
+{
+}
+#else
+void ksu_throne_tracker_init(void);
+void ksu_throne_tracker_exit(void);
+void track_throne(unsigned int flags);
+void ksu_handle_rename(struct dentry *old_dentry, struct dentry *new_dentry);
+#endif
+
+#endif
