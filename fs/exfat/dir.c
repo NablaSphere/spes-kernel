@@ -3,7 +3,6 @@
  * Copyright (C) 2012-2013 Samsung Electronics Co., Ltd.
  */
 
-#include <linux/version.h>
 #include <linux/slab.h>
 #include <linux/compat.h>
 #include <linux/bio.h>
@@ -307,17 +306,10 @@ out:
 	return err;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
-WRAP_DIR_ITER(exfat_iterate) // FIXME!
-#endif
 const struct file_operations exfat_dir_operations = {
 	.llseek		= generic_file_llseek,
 	.read		= generic_read_dir,
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
-	.iterate_shared	= shared_exfat_iterate,
-#else
 	.iterate	= exfat_iterate,
-#endif
 	.unlocked_ioctl = exfat_ioctl,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl = exfat_compat_ioctl,
@@ -461,19 +453,11 @@ int exfat_init_dir_entry(struct inode *inode, struct exfat_chain *p_dir,
 {
 	struct super_block *sb = inode->i_sb;
 	struct exfat_sb_info *sbi = EXFAT_SB(sb);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0)
 	struct timespec64 ts;
-#else
-	struct timespec ts;
-#endif
 	struct exfat_dentry *ep;
 	struct buffer_head *bh;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)
 	ts = current_time(inode);
-#else
-	ts = CURRENT_TIME_SEC;
-#endif
 
 	/*
 	 * We cannot use exfat_get_dentry_set here because file ep is not
