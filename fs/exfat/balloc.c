@@ -24,6 +24,45 @@
 #error "BITS_PER_LONG not 32 or 64"
 #endif
 
+static bool exfat_test_bitmap_range(struct super_block *sb,
+		unsigned int clu, unsigned int count)
+{
+	struct exfat_sb_info *sbi = EXFAT_SB(sb);
+	unsigned int start, end, ent_idx;
+	unsigned int map_i, map_b;
+	unsigned int lo, hi;
+	unsigned long bits, mask;
+
+	if (!count || !is_valid_cluster(sbi, clu) ||
+	    count > sbi->num_clusters - clu)
+		return false;
+
+	start = CLUSTER_TO_BITMAP_ENT(clu);
+	end = start + count - 1;
+
+	ent_idx = ALIGN_DOWN(start, BITS_PER_LONG);
+	for (;;) {
+		map_i = BITMAP_OFFSET_SECTOR_INDEX(sb, ent_idx);
+		map_b = BITMAP_OFFSET_BYTE_IN_SECTOR(sb, ent_idx);
+		bits = lel_to_cpu(*(__le_long *)(sbi->vol_amap[map_i]->b_data +
+						 map_b));
+
+		lo = ent_idx < start ? start - ent_idx : 0;
+		hi = end - ent_idx < BITS_PER_LONG ?
+			end - ent_idx : BITS_PER_LONG - 1;
+		mask = GENMASK(hi, lo);
+
+		if ((bits & mask) != mask)
+			return false;
+
+		if (end - ent_idx < BITS_PER_LONG)
+			break;
+		ent_idx += BITS_PER_LONG;
+	}
+
+	return true;
+}
+
 /*
  *  Allocation Bitmap Management Functions
  */
@@ -36,6 +75,11 @@ static int exfat_allocate_bitmap(struct super_block *sb,
 	sector_t sector;
 
 	sbi->map_clu = le32_to_cpu(ep->dentry.bitmap.start_clu);
+	if (!is_valid_cluster(sbi, sbi->map_clu)) {
+		exfat_err(sb, "invalid start cluster of allocate-bitmap");
+		return -EINVAL;
+	}
+
 	map_size = le64_to_cpu(ep->dentry.bitmap.size);
 	need_map_size = ((EXFAT_DATA_CLUSTER_COUNT(sbi) - 1) / BITS_PER_BYTE)
 		+ 1;
@@ -49,6 +93,12 @@ static int exfat_allocate_bitmap(struct super_block *sb,
 		if (need_map_size > map_size)
 			return -EIO;
 	}
+	if (EXFAT_B_TO_CLU_ROUND_UP(map_size, sbi) >
+	    sbi->num_clusters - sbi->map_clu) {
+		exfat_err(sb, "invalid allocation bitmap cluster range");
+		return -EINVAL;
+	}
+
 	sbi->map_sectors = ((need_map_size - 1) >>
 			(sb->s_blocksize_bits)) + 1;
 	sbi->vol_amap = kvmalloc_array(sbi->map_sectors,
@@ -72,6 +122,13 @@ static int exfat_allocate_bitmap(struct super_block *sb,
 		}
 	}
 
+	if (!exfat_test_bitmap_range(sb, sbi->map_clu,
+			EXFAT_B_TO_CLU_ROUND_UP(map_size, sbi))) {
+		exfat_err(sb, "allocation bitmap is not allocated");
+		exfat_free_bitmap(sbi);
+		return -EINVAL;
+	}
+
 	return 0;
 }
 
@@ -92,10 +149,14 @@ int exfat_load_bitmap(struct super_block *sb)
 				return -EIO;
 
 			type = exfat_get_entry_type(ep);
-			if (type == TYPE_UNUSED)
-				break;
-			if (type != TYPE_BITMAP)
+			if (type == TYPE_UNUSED) {
+				brelse(bh);
+				return -EINVAL;
+			}
+			if (type != TYPE_BITMAP) {
+				brelse(bh);
 				continue;
+			}
 			if (ep->dentry.bitmap.flags == 0x0) {
 				int err;
 
@@ -117,17 +178,20 @@ void exfat_free_bitmap(struct exfat_sb_info *sbi)
 {
 	int i;
 
+	if (!sbi->vol_amap)
+		return;
+
 	for (i = 0; i < sbi->map_sectors; i++)
 		__brelse(sbi->vol_amap[i]);
 
 	kvfree(sbi->vol_amap);
+	sbi->vol_amap = NULL;
 }
 
-int exfat_set_bitmap(struct inode *inode, unsigned int clu, bool sync)
+int exfat_set_bitmap(struct super_block *sb, unsigned int clu, bool sync)
 {
 	int i, b;
 	unsigned int ent_idx;
-	struct super_block *sb = inode->i_sb;
 	struct exfat_sb_info *sbi = EXFAT_SB(sb);
 
 	if (!is_valid_cluster(sbi, clu))
@@ -142,20 +206,24 @@ int exfat_set_bitmap(struct inode *inode, unsigned int clu, bool sync)
 	return 0;
 }
 
-void exfat_clear_bitmap(struct inode *inode, unsigned int clu, bool sync)
+int exfat_clear_bitmap(struct super_block *sb, unsigned int clu, bool sync)
 {
 	int i, b;
 	unsigned int ent_idx;
-	struct super_block *sb = inode->i_sb;
 	struct exfat_sb_info *sbi = EXFAT_SB(sb);
 	struct exfat_mount_options *opts = &sbi->options;
 
 	if (!is_valid_cluster(sbi, clu))
-		return;
+		return -EIO;
 
 	ent_idx = CLUSTER_TO_BITMAP_ENT(clu);
 	i = BITMAP_OFFSET_SECTOR_INDEX(sb, ent_idx);
 	b = BITMAP_OFFSET_BIT_IN_SECTOR(sb, ent_idx);
+
+	if (!test_bit_le(b, sbi->vol_amap[i]->b_data)) {
+		exfat_fs_error(sb, "cluster %u is already free", clu);
+		return -EIO;
+	}
 
 	clear_bit_le(b, sbi->vol_amap[i]->b_data);
 	exfat_update_bh(sbi->vol_amap[i], sync);
@@ -172,6 +240,24 @@ void exfat_clear_bitmap(struct inode *inode, unsigned int clu, bool sync)
 			opts->discard = 0;
 		}
 	}
+
+	return 0;
+}
+
+bool exfat_test_bitmap(struct super_block *sb, unsigned int clu)
+{
+	int i, b;
+	unsigned int ent_idx;
+	struct exfat_sb_info *sbi = EXFAT_SB(sb);
+
+	if (!sbi->vol_amap || !is_valid_cluster(sbi, clu))
+		return false;
+
+	ent_idx = CLUSTER_TO_BITMAP_ENT(clu);
+	i = BITMAP_OFFSET_SECTOR_INDEX(sb, ent_idx);
+	b = BITMAP_OFFSET_BIT_IN_SECTOR(sb, ent_idx);
+
+	return test_bit_le(b, sbi->vol_amap[i]->b_data);
 }
 
 /*

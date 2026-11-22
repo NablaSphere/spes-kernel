@@ -702,6 +702,16 @@ static int exfat_find_location(struct super_block *sb, struct exfat_chain *p_dir
 	if (ret)
 		return ret;
 
+	if (!is_valid_cluster(sbi, clu)) {
+		exfat_fs_error(sb, "invalid cluster %u in directory", clu);
+		return -EIO;
+	}
+
+	if (sbi->vol_amap && !exfat_test_bitmap(sb, clu)) {
+		exfat_fs_error(sb, "unallocated cluster %u in directory", clu);
+		return -EIO;
+	}
+
 	/* byte offset in cluster */
 	off = EXFAT_CLU_OFFSET(off, sbi);
 

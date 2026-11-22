@@ -696,6 +696,20 @@ static int __exfat_fill_super(struct super_block *sb)
 		goto free_upcase_table;
 	}
 
+	if (!exfat_test_bitmap(sb, sbi->root_dir)) {
+		if (sb->s_flags & MS_RDONLY) {
+			exfat_err(sb, "root directory cluster %u is not allocated",
+				  sbi->root_dir);
+			ret = -EINVAL;
+			goto free_alloc_bitmap;
+		}
+		exfat_warn(sb, "root directory cluster %u is not allocated, repairing bitmap",
+			   sbi->root_dir);
+		ret = exfat_set_bitmap(sb, sbi->root_dir, true);
+		if (ret)
+			goto free_alloc_bitmap;
+	}
+
 	ret = exfat_count_used_clusters(sb, &sbi->used_clusters);
 	if (ret) {
 		exfat_err(sb, "failed to scan clusters");
