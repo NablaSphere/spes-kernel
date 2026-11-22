@@ -494,9 +494,13 @@ static int exfat_read_boot_sector(struct super_block *sb)
 {
 	struct boot_sector *p_boot;
 	struct exfat_sb_info *sbi = EXFAT_SB(sb);
+	u32 clu_count;
 
 	/* set block size to read super block */
-	sb_min_blocksize(sb, 512);
+	if (!sb_min_blocksize(sb, 512)) {
+		exfat_err(sb, "unable to set blocksize");
+		return -EINVAL;
+	}
 
 	/* read boot sector */
 	sbi->boot_bh = sb_bread(sb, 0);
@@ -560,11 +564,19 @@ static int exfat_read_boot_sector(struct super_block *sb)
 		sbi->FAT2_start_sector += sbi->num_FAT_sectors;
 	sbi->data_start_sector = le32_to_cpu(p_boot->clu_offset);
 	sbi->num_sectors = le64_to_cpu(p_boot->vol_length);
+	clu_count = le32_to_cpu(p_boot->clu_count);
+	if (clu_count == 0 || clu_count > EXFAT_MAX_NUM_CLUSTER) {
+		exfat_err(sb, "bogus cluster count : %u", clu_count);
+		return -EINVAL;
+	}
 	/* because the cluster index starts with 2 */
-	sbi->num_clusters = le32_to_cpu(p_boot->clu_count) +
-		EXFAT_RESERVED_CLUSTERS;
+	sbi->num_clusters = clu_count + EXFAT_RESERVED_CLUSTERS;
 
 	sbi->root_dir = le32_to_cpu(p_boot->root_cluster);
+	if (!is_valid_cluster(sbi, sbi->root_dir)) {
+		exfat_err(sb, "bogus root cluster : %u", sbi->root_dir);
+		return -EINVAL;
+	}
 	sbi->dentries_per_clu = 1 <<
 		(sbi->cluster_size_bits - DENTRY_SIZE_BITS);
 
@@ -587,14 +599,21 @@ static int exfat_read_boot_sector(struct super_block *sb)
 		return -EINVAL;
 	}
 
+	if (sbi->num_sectors < sbi->data_start_sector ||
+	    (sbi->num_sectors - sbi->data_start_sector) <
+	    ((u64)EXFAT_DATA_CLUSTER_COUNT(sbi) << sbi->sect_per_clus_bits)) {
+		exfat_err(sb, "bogus volume length");
+		return -EINVAL;
+	}
+
 	if (sbi->vol_flags & VOLUME_DIRTY)
 		exfat_warn(sb, "Volume was not properly unmounted. Some data may be corrupt. Please run fsck.");
 	if (sbi->vol_flags & MEDIA_FAILURE)
 		exfat_warn(sb, "Medium has reported failures. Some data may be lost.");
 
-	/* exFAT file size is limited by a disk volume size */
-	sb->s_maxbytes = (u64)(sbi->num_clusters - EXFAT_RESERVED_CLUSTERS) <<
-		sbi->cluster_size_bits;
+	/* exFAT file size is limited by EXFAT_MAX_NUM_CLUSTER */
+	sb->s_maxbytes = min(MAX_LFS_FILESIZE,
+			     EXFAT_CLU_TO_B((loff_t)EXFAT_MAX_NUM_CLUSTER, sbi));
 
 	/* check logical sector size */
 	if (exfat_calibrate_blocksize(sb, 1 << p_boot->sect_size_bits))
