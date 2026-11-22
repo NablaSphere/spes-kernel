@@ -17,6 +17,7 @@
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/of_device.h>
+#include <linux/rtnetlink.h>
 #include <linux/string.h>
 #include <linux/skbuff.h>
 #include <linux/version.h>
@@ -2481,6 +2482,14 @@ static int ipa3_wwan_probe(struct platform_device *pdev)
 					ret);
 			goto q6_init_err;
 		}
+	}
+
+	rtnl_lock();
+	ret = dev_alloc_name(dev, dev->name);
+	rtnl_unlock();
+	if (ret < 0) {
+		IPAWANERR("fail to allocate netdev name, ret: %d\n", ret);
+		goto fail_pm;
 	}
 
 	ret = ipa3_wwan_register_netdev_pm_client(dev);
