@@ -895,7 +895,7 @@ static int exfat_check_dir_empty(struct super_block *sb,
 		struct exfat_chain *p_dir)
 {
 	int i, dentries_per_clu;
-	unsigned int type;
+	unsigned int type, clu_count = 0;
 	struct exfat_chain clu;
 	struct exfat_dentry *ep;
 	struct exfat_sb_info *sbi = EXFAT_SB(sb);
@@ -932,6 +932,12 @@ static int exfat_check_dir_empty(struct super_block *sb,
 		} else {
 			if (exfat_get_next_cluster(sb, &(clu.dir)))
 				return -EIO;
+		}
+
+		if (++clu_count >= EXFAT_DATA_CLUSTER_COUNT(sbi) &&
+		    clu.dir != EXFAT_EOF_CLUSTER) {
+			exfat_fs_error(sb, "cluster chain loop detected");
+			return -EIO;
 		}
 	}
 
