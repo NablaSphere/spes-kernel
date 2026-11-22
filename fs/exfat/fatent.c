@@ -462,6 +462,11 @@ int exfat_count_num_clusters(struct super_block *sb,
 			break;
 	}
 
+	if (i == sbi->num_clusters && clu != EXFAT_EOF_CLUSTER) {
+		exfat_fs_error(sb, "cluster chain loop detected");
+		return -EIO;
+	}
+
 	*ret_count = count;
 	return 0;
 }

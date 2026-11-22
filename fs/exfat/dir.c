@@ -125,7 +125,7 @@ static int exfat_readdir(struct inode *inode, loff_t *cpos, struct exfat_dir_ent
 			type = exfat_get_entry_type(ep);
 			if (type == TYPE_UNUSED) {
 				brelse(bh);
-				break;
+				goto out;
 			}
 
 			if (type != TYPE_FILE && type != TYPE_DIR) {
@@ -189,6 +189,7 @@ static int exfat_readdir(struct inode *inode, loff_t *cpos, struct exfat_dir_ent
 		}
 	}
 
+out:
 	dir_entry->namebuf.lfn[0] = '\0';
 	*cpos = EXFAT_DEN_TO_B(dentry);
 	return 0;
@@ -266,7 +267,7 @@ get_new:
 		 */
 		if (err == -EIO) {
 			cpos += 1 << (sb->s_blocksize_bits);
-			cpos &= ~(sb->s_blocksize - 1);
+			cpos &= ~(loff_t)(sb->s_blocksize - 1);
 		}
 
 		err = -EIO;
@@ -895,13 +896,16 @@ int exfat_get_dentry_set(struct exfat_entry_set_cache *es,
 	if (!exfat_validate_entry(exfat_get_entry_type(ep), &mode))
 		goto put_es;
 
+	if (ep->dentry.file.num_ext < 2)
+		goto put_es;
+
 	num_entries = type == ES_ALL_ENTRIES ?
 		ep->dentry.file.num_ext + 1 : type;
 	es->num_entries = num_entries;
 
 	num_bh = EXFAT_B_TO_BLK_ROUND_UP(off + num_entries * DENTRY_SIZE, sb);
 	if (num_bh > ARRAY_SIZE(es->__bh)) {
-		es->bh = kmalloc_array(num_bh, sizeof(*es->bh), GFP_KERNEL);
+		es->bh = kmalloc_array(num_bh, sizeof(*es->bh), GFP_NOFS);
 		if (!es->bh) {
 			brelse(bh);
 			return -ENOMEM;
@@ -918,6 +922,10 @@ int exfat_get_dentry_set(struct exfat_entry_set_cache *es,
 				clu++;
 			else if (exfat_get_next_cluster(sb, &clu))
 				goto put_es;
+
+			if (!is_valid_cluster(sbi, clu))
+				goto put_es;
+
 			sec = exfat_cluster_to_sector(sbi, clu);
 		} else {
 			sec++;
@@ -997,7 +1005,7 @@ int exfat_find_dir_entry(struct super_block *sb, struct exfat_inode_info *ei,
 	int i, rewind = 0, dentry = 0, end_eidx = 0, num_ext = 0, len;
 	int order, step, name_len = 0;
 	int dentries_per_clu;
-	unsigned int entry_type;
+	unsigned int entry_type, clu_count;
 	unsigned short *uniname = NULL;
 	struct exfat_chain clu;
 	struct exfat_hint *hint_stat = &ei->hint_stat;
@@ -1023,6 +1031,7 @@ int exfat_find_dir_entry(struct super_block *sb, struct exfat_inode_info *ei,
 rewind:
 	order = 0;
 	step = DIRENT_STEP_FILE;
+	clu_count = 0;
 	exfat_reset_empty_hint(&candi_empty);
 
 	while (clu.dir != EXFAT_EOF_CLUSTER) {
@@ -1088,13 +1097,14 @@ rewind:
 				continue;
 			}
 
-			brelse(bh);
 			if (entry_type == TYPE_EXTEND) {
 				unsigned short entry_uniname[16], unichar;
 
 				if (step != DIRENT_STEP_NAME ||
-				    name_len >= MAX_NAME_LENGTH) {
+				    name_len >= MAX_NAME_LENGTH ||
+				    order + 1 >= num_entries) {
 					step = DIRENT_STEP_FILE;
+					brelse(bh);
 					continue;
 				}
 
@@ -1104,13 +1114,16 @@ rewind:
 					uniname += EXFAT_FILE_NAME_LEN;
 
 				len = exfat_extract_uni_name(ep, entry_uniname);
+				brelse(bh);
 				name_len += len;
 
-				unichar = *(uniname+len);
-				*(uniname+len) = 0x0;
+				unichar = *(uniname + len);
+				*(uniname + len) = 0x0;
 
 				if (exfat_uniname_ncmp(sb, uniname,
-					entry_uniname, len)) {
+					entry_uniname, len) ||
+				    (len < EXFAT_FILE_NAME_LEN &&
+				     p_uniname->name_len != name_len)) {
 					step = DIRENT_STEP_FILE;
 				} else if (p_uniname->name_len == name_len) {
 					if (order == num_ext)
@@ -1118,10 +1131,11 @@ rewind:
 					step = DIRENT_STEP_SECD;
 				}
 
-				*(uniname+len) = unichar;
+				*(uniname + len) = unichar;
 				continue;
 			}
 
+			brelse(bh);
 			if (entry_type &
 					(TYPE_CRITICAL_SEC | TYPE_BENIGN_SEC)) {
 				if (step == DIRENT_STEP_SECD) {
@@ -1141,6 +1155,12 @@ rewind:
 		} else {
 			if (exfat_get_next_cluster(sb, &clu.dir))
 				return -EIO;
+		}
+
+		if (++clu_count >= EXFAT_DATA_CLUSTER_COUNT(sbi) &&
+		    clu.dir != EXFAT_EOF_CLUSTER) {
+			exfat_fs_error(sb, "cluster chain loop detected");
+			return -EIO;
 		}
 	}
 
@@ -1223,7 +1243,7 @@ int exfat_count_dir_entries(struct super_block *sb, struct exfat_chain *p_dir)
 {
 	int i, count = 0;
 	int dentries_per_clu;
-	unsigned int entry_type;
+	unsigned int entry_type, clu_count = 0;
 	struct exfat_chain clu;
 	struct exfat_dentry *ep;
 	struct exfat_sb_info *sbi = EXFAT_SB(sb);
@@ -1256,6 +1276,12 @@ int exfat_count_dir_entries(struct super_block *sb, struct exfat_chain *p_dir)
 		} else {
 			if (exfat_get_next_cluster(sb, &(clu.dir)))
 				return -EIO;
+		}
+
+		if (++clu_count >= EXFAT_DATA_CLUSTER_COUNT(sbi) &&
+		    clu.dir != EXFAT_EOF_CLUSTER) {
+			exfat_fs_error(sb, "cluster chain loop detected");
+			return -EIO;
 		}
 	}
 
