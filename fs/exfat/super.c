@@ -234,6 +234,8 @@ enum {
 	Opt_err_ro,
 	Opt_err,
 	Opt_discard,
+	Opt_keep_last_dots,
+	Opt_sys_tz,
 	Opt_time_offset,
 
 	/* Deprecated options */
@@ -242,7 +244,6 @@ enum {
 	Opt_namecase,
 	Opt_codepage,
 	Opt_zero_size_dir,
-	Opt_fs,
 };
 
 static const match_table_t exfat_tokens = {
@@ -257,6 +258,9 @@ static const match_table_t exfat_tokens = {
 	{Opt_err_panic, "errors=panic"},
 	{Opt_err_ro, "errors=remount-ro"},
 	{Opt_discard, "discard"},
+	{Opt_keep_last_dots, "keep_last_dots"},
+	{Opt_sys_tz, "sys_tz"},
+	{Opt_time_offset, "time_offset=%d"},
 	{Opt_codepage, "codepage=%u"},
 	{Opt_namecase, "namecase=%u"},
 	{Opt_debug, "debug"},
@@ -276,7 +280,7 @@ static int parse_options(struct super_block *sb, char *options, int silent,
 	opts->fs_uid = current_uid();
 	opts->fs_gid = current_gid();
 	opts->fs_fmask = opts->fs_dmask = current->fs->umask;
-	opts->allow_utime = -1;
+	opts->allow_utime = (unsigned short)-1;
 	opts->iocharset = exfat_default_iocharset;
 	opts->utf8 = 0;
 	opts->errors = EXFAT_ERRORS_RO;
@@ -294,19 +298,23 @@ static int parse_options(struct super_block *sb, char *options, int silent,
 		switch (token) {
 			case Opt_uid:
 				if (match_int(&args[0], &option))
-					return 0;
+					return -EINVAL;
 				opts->fs_uid = make_kuid(current_user_ns(), option);
+				if (!uid_valid(opts->fs_uid))
+					return -EINVAL;
 				break;
 			case Opt_gid:
 				if (match_int(&args[0], &option))
-					return 0;
+					return -EINVAL;
 				opts->fs_gid = make_kgid(current_user_ns(), option);
+				if (!gid_valid(opts->fs_gid))
+					return -EINVAL;
 				break;
 			case Opt_umask:
 			case Opt_dmask:
 			case Opt_fmask:
 				if (match_octal(&args[0], &option))
-					return 0;
+					return -EINVAL;
 				if (token != Opt_dmask)
 					opts->fs_fmask = option;
 				if (token != Opt_fmask)
@@ -314,15 +322,15 @@ static int parse_options(struct super_block *sb, char *options, int silent,
 				break;
 			case Opt_allow_utime:
 				if (match_octal(&args[0], &option))
-					return 0;
+					return -EINVAL;
 				opts->allow_utime = option & (0022);
 				break;
 			case Opt_charset:
-				if (opts->iocharset != exfat_default_iocharset)
-					kfree(opts->iocharset);
 				tmpstr = match_strdup(&args[0]);
 				if (!tmpstr)
 					return -ENOMEM;
+				if (opts->iocharset != exfat_default_iocharset)
+					kfree(opts->iocharset);
 				opts->iocharset = tmpstr;
 				break;
 			case Opt_err_cont:
@@ -336,6 +344,12 @@ static int parse_options(struct super_block *sb, char *options, int silent,
 				break;
 			case Opt_discard:
 				opts->discard = 1;
+				break;
+			case Opt_keep_last_dots:
+				opts->keep_last_dots = 1;
+				break;
+			case Opt_sys_tz:
+				opts->sys_tz = 1;
 				break;
 			case Opt_time_offset:
 				if (match_int(&args[0], &option))
@@ -367,7 +381,7 @@ static int parse_options(struct super_block *sb, char *options, int silent,
 	}
 
 out:
-	if (opts->allow_utime == -1)
+	if (opts->allow_utime == (unsigned short)-1)
 		opts->allow_utime = ~opts->fs_dmask & (0022);
 
 	if (opts->discard) {
