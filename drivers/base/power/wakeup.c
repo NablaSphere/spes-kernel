@@ -909,7 +909,7 @@ bool pm_wakeup_pending(void)
 	if (ret) {
 		pm_get_active_wakeup_sources(suspend_abort,
 					     MAX_SUSPEND_ABORT_LEN);
-		log_suspend_abort_reason(suspend_abort);
+		log_suspend_abort_reason("%s", suspend_abort);
 		pr_info("PM: %s\n", suspend_abort);
 	}
 
