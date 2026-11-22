@@ -118,7 +118,7 @@ static int exfat_d_cmp(const struct dentry *dentry, unsigned int len,
 	if (alen != blen)
 		return 1;
 
-	for (i = 0; i < len; i += charlen) {
+	for (i = 0; i < alen; i += charlen) {
 		charlen = t->char2uni(&name->name[i], alen - i, &c1);
 		if (charlen < 0)
 			return 1;
@@ -377,6 +377,7 @@ static int exfat_find_empty_entry(struct inode *inode,
 		if (ei->start_clu == EXFAT_EOF_CLUSTER) {
 			ei->start_clu = clu.dir;
 			p_dir->dir = clu.dir;
+			hint_femp.eidx = 0;
 		}
 
 		/* append to the FAT chain */
@@ -612,6 +613,7 @@ static int exfat_find(struct inode *dir, struct qstr *qname,
 		struct exfat_dir_entry *info)
 {
 	int ret, dentry, count;
+	loff_t stream_size;
 	struct exfat_chain cdir;
 	struct exfat_uni_name uni_name;
 	struct super_block *sb = dir->i_sb;
@@ -660,14 +662,9 @@ static int exfat_find(struct inode *dir, struct qstr *qname,
 	info->type = exfat_get_entry_type(ep);
 	info->attr = le16_to_cpu(ep->dentry.file.attr);
 	info->size = le64_to_cpu(ep2->dentry.stream.valid_size);
-	if (info->size == 0) {
-		info->flags = ALLOC_NO_FAT_CHAIN;
-		info->start_clu = EXFAT_EOF_CLUSTER;
-	} else {
-		info->flags = ep2->dentry.stream.flags;
-		info->start_clu =
-			le32_to_cpu(ep2->dentry.stream.start_clu);
-	}
+	stream_size = le64_to_cpu(ep2->dentry.stream.size);
+	info->flags = ep2->dentry.stream.flags;
+	info->start_clu = le32_to_cpu(ep2->dentry.stream.start_clu);
 
 	exfat_get_entry_time(sbi, &info->crtime,
 			     ep->dentry.file.create_tz,
@@ -686,14 +683,49 @@ static int exfat_find(struct inode *dir, struct qstr *qname,
 			     0);
 	exfat_put_dentry_set(&es, false);
 
-	if (ei->start_clu == EXFAT_FREE_CLUSTER) {
+	if (info->size < 0 || stream_size < 0) {
 		exfat_fs_error(sb,
-			       "non-zero size file starts with zero cluster (size : %llu, p_dir : %u, entry : 0x%08x)",
-			       i_size_read(dir), ei->dir.dir, ei->entry);
+			       "negative file size (valid_size : %lld, size : %lld)",
+			       info->size, stream_size);
 		return -EIO;
 	}
 
+	if (info->size > stream_size) {
+		exfat_warn(sb,
+			   "valid_size(%lld) is larger than size(%lld), clamping",
+			   info->size, stream_size);
+		info->size = stream_size;
+	}
+
+	if (info->size &&
+	    sbi->used_clusters != EXFAT_CLUSTERS_UNTRACKED &&
+	    unlikely(EXFAT_B_TO_CLU_ROUND_UP(info->size, sbi) >
+		     sbi->used_clusters)) {
+		exfat_fs_error(sb,
+			       "file size(%lld) exceeds used clusters(%u)",
+			       info->size, sbi->used_clusters);
+		return -EIO;
+	}
+
+	if (!is_valid_cluster(sbi, info->start_clu) && info->size) {
+		exfat_fs_error(sb,
+			       "invalid start cluster(%u) with non-zero size(%lld)",
+			       info->start_clu, info->size);
+		return -EIO;
+	}
+
+	if (info->size == 0) {
+		info->flags = ALLOC_NO_FAT_CHAIN;
+		info->start_clu = EXFAT_EOF_CLUSTER;
+	}
+
 	if (info->type == TYPE_DIR) {
+		if (info->size & (sbi->cluster_size - 1)) {
+			exfat_fs_error(sb,
+				       "directory size(%lld) is not cluster aligned",
+				       info->size);
+			return -EIO;
+		}
 		exfat_chain_set(&cdir, info->start_clu,
 				EXFAT_B_TO_CLU(info->size, sbi), info->flags);
 		count = exfat_count_dir_entries(sb, &cdir);
@@ -1034,25 +1066,33 @@ static int exfat_rename_file(struct inode *inode, struct exfat_chain *p_dir,
 		return -EIO;
 
 	num_old_entries = exfat_count_ext_entries(sb, p_dir, oldentry, epold);
-	if (num_old_entries < 0)
+	if (num_old_entries < 0) {
+		brelse(old_bh);
 		return -EIO;
+	}
 	num_old_entries++;
 
 	num_new_entries = exfat_calc_num_entries(p_uniname);
-	if (num_new_entries < 0)
+	if (num_new_entries < 0) {
+		brelse(old_bh);
 		return num_new_entries;
+	}
 
 	if (num_old_entries < num_new_entries) {
 		int newentry;
 
 		newentry =
 			exfat_find_empty_entry(inode, p_dir, num_new_entries);
-		if (newentry < 0)
+		if (newentry < 0) {
+			brelse(old_bh);
 			return newentry; /* -EIO or -ENOSPC */
+		}
 
 		epnew = exfat_get_dentry(sb, p_dir, newentry, &new_bh);
-		if (!epnew)
+		if (!epnew) {
+			brelse(old_bh);
 			return -EIO;
+		}
 
 		*epnew = *epold;
 		if (exfat_get_entry_type(epnew) == TYPE_FILE) {
@@ -1119,21 +1159,29 @@ static int exfat_move_file(struct inode *inode, struct exfat_chain *p_olddir,
 
 	num_old_entries = exfat_count_ext_entries(sb, p_olddir, oldentry,
 		epmov);
-	if (num_old_entries < 0)
+	if (num_old_entries < 0) {
+		brelse(mov_bh);
 		return -EIO;
+	}
 	num_old_entries++;
 
 	num_new_entries = exfat_calc_num_entries(p_uniname);
-	if (num_new_entries < 0)
+	if (num_new_entries < 0) {
+		brelse(mov_bh);
 		return num_new_entries;
+	}
 
 	newentry = exfat_find_empty_entry(inode, p_newdir, num_new_entries);
-	if (newentry < 0)
+	if (newentry < 0) {
+		brelse(mov_bh);
 		return newentry; /* -EIO or -ENOSPC */
+	}
 
 	epnew = exfat_get_dentry(sb, p_newdir, newentry, &new_bh);
-	if (!epnew)
+	if (!epnew) {
+		brelse(mov_bh);
 		return -EIO;
+	}
 
 	*epnew = *epmov;
 	if (exfat_get_entry_type(epnew) == TYPE_FILE) {
@@ -1268,6 +1316,7 @@ static int __exfat_rename(struct inode *old_parent_inode,
 		num_entries = exfat_count_ext_entries(sb, p_dir, new_entry, ep);
 		if (num_entries < 0) {
 			ret = -EIO;
+			brelse(new_bh);
 			goto del_out;
 		}
 		brelse(new_bh);
@@ -1316,6 +1365,14 @@ static int exfat_rename(struct inode *old_dir, struct dentry *old_dentry,
 	struct super_block *sb = old_dir->i_sb;
 	loff_t i_pos;
 	int err;
+
+	/*
+	 * The VFS already checks for existence, so for local filesystems
+	 * the RENAME_NOREPLACE implementation is equivalent to plain rename.
+	 * Don't support any other flags.
+	 */
+	if (flags & ~RENAME_NOREPLACE)
+		return -EINVAL;
 
 	mutex_lock(&EXFAT_SB(sb)->s_lock);
 	old_inode = old_dentry->d_inode;
