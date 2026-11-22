@@ -669,6 +669,14 @@ static int exfat_load_upcase_table(struct super_block *sb,
 	while (sector < num_sectors) {
 		struct buffer_head *bh;
 
+		if (index > 0xFFFF) {
+			exfat_err(sb,
+				  "upcase table has trailing sectors (idx : 0x%08x)",
+				  index);
+			ret = -EINVAL;
+			goto free_table;
+		}
+
 		bh = sb_bread(sb, sector);
 		if (!bh) {
 			exfat_err(sb, "failed to read sector(0x%llx)",
@@ -779,10 +787,25 @@ int exfat_create_upcase_table(struct super_block *sb)
 			tbl_clu  = le32_to_cpu(ep->dentry.upcase.start_clu);
 			tbl_size = le64_to_cpu(ep->dentry.upcase.size);
 
-			sector = exfat_cluster_to_sector(sbi, tbl_clu);
-			num_sectors = ((tbl_size - 1) >> blksize_bits) + 1;
-			ret = exfat_load_upcase_table(sb, sector, num_sectors,
-				le32_to_cpu(ep->dentry.upcase.checksum));
+			if (tbl_size && is_valid_cluster(sbi, tbl_clu)) {
+				sector = exfat_cluster_to_sector(sbi, tbl_clu);
+				num_sectors = ((tbl_size - 1) >> blksize_bits) + 1;
+				if (num_sectors <= sbi->num_sectors - sector) {
+					ret = exfat_load_upcase_table(sb, sector,
+						num_sectors,
+						le32_to_cpu(ep->dentry.upcase.checksum));
+				} else {
+					exfat_fs_error(sb,
+						"upcase table exceeds volume size (clu : 0x%08x, size : %llu)",
+						tbl_clu, tbl_size);
+					ret = -EINVAL;
+				}
+			} else {
+				exfat_fs_error(sb,
+					"invalid upcase table (clu : 0x%08x, size : %llu)",
+					tbl_clu, tbl_size);
+				ret = -EINVAL;
+			}
 
 			brelse(bh);
 			if (ret && ret != -EIO)
@@ -796,6 +819,7 @@ int exfat_create_upcase_table(struct super_block *sb)
 			return -EIO;
 	}
 
+	exfat_fs_error(sb, "no upcase table entry. Please run fsck");
 load_default:
 	/* load default upcase table */
 	return exfat_load_default_upcase_table(sb);
@@ -804,4 +828,5 @@ load_default:
 void exfat_free_upcase_table(struct exfat_sb_info *sbi)
 {
 	kvfree(sbi->vol_utbl);
+	sbi->vol_utbl = NULL;
 }

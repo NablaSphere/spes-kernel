@@ -23,6 +23,7 @@
 /* Cluster 0, 1 are reserved, the first cluster is 2 in the cluster heap. */
 #define EXFAT_RESERVED_CLUSTERS	2
 #define EXFAT_FIRST_CLUSTER	2
+#define EXFAT_MAX_NUM_CLUSTER	(0xFFFFFFF5)
 #define EXFAT_DATA_CLUSTER_COUNT(sbi)	\
 	((sbi)->num_clusters - EXFAT_RESERVED_CLUSTERS)
 
