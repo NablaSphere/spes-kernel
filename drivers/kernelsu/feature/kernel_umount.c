@@ -13,6 +13,7 @@
 
 #ifdef CONFIG_KSU_SUSFS
 #include <linux/susfs_def.h>
+#include <linux/workqueue.h>
 #endif // #ifdef CONFIG_KSU_SUSFS
 
 #include "feature/kernel_umount.h"

@@ -11,7 +11,7 @@
 #include <linux/stat.h>
 #include <linux/namei.h>
 #include <linux/kernel.h> // for container_of in UL
-#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+#if defined(CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER) || defined(CONFIG_KSU_SUSFS_SUS_PATH)
 #include <linux/susfs.h>
 #endif
 
