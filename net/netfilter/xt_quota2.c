@@ -77,7 +77,6 @@ module_param_named(perms, quota_list_perms, uint, S_IRUGO | S_IWUSR);
 
 #ifdef CONFIG_NETFILTER_XT_MATCH_QUOTA2_LOG
 static void quota2_log(unsigned int hooknum,
-		       const struct sk_buff *skb,
 		       const struct net_device *in,
 		       const struct net_device *out,
 		       const char *prefix)
@@ -107,8 +106,6 @@ static void quota2_log(unsigned int hooknum,
 	}
 	pm = nlmsg_data(nlh);
 	memset(pm, 0, sizeof(*pm));
-	if (skb->tstamp == 0)
-		__net_timestamp((struct sk_buff *)skb);
 	pm->hook = hooknum;
 	if (prefix != NULL)
 		strlcpy(pm->prefix, prefix, sizeof(pm->prefix));
@@ -123,7 +120,6 @@ static void quota2_log(unsigned int hooknum,
 }
 #else
 static void quota2_log(unsigned int hooknum,
-		       const struct sk_buff *skb,
 		       const struct net_device *in,
 		       const struct net_device *out,
 		       const char *prefix)
@@ -322,7 +318,6 @@ quota_mt2(const struct sk_buff *skb, struct xt_action_param *par)
 		} else if (e->quota) {
 			/* We are transitioning, log that fact. */
 			quota2_log(xt_hooknum(par),
-				   skb,
 				   xt_in(par),
 				   xt_out(par),
 				   q->name);
