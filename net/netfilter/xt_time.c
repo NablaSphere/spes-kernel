@@ -162,20 +162,7 @@ time_mt(const struct sk_buff *skb, struct xt_action_param *par)
 	struct xtm current_time;
 	s64 stamp;
 
-	/*
-	 * We cannot use get_seconds() instead of __net_timestamp() here.
-	 * Suppose you have two rules:
-	 * 	1. match before 13:00
-	 * 	2. match after 13:00
-	 * If you match against processing time (get_seconds) it
-	 * may happen that the same packet matches both rules if
-	 * it arrived at the right moment before 13:00.
-	 */
-	if (skb->tstamp == 0)
-		__net_timestamp((struct sk_buff *)skb);
-
-	stamp = ktime_to_ns(skb->tstamp);
-	stamp = div_s64(stamp, NSEC_PER_SEC);
+	stamp = ktime_get_real_seconds();
 
 	if (info->flags & XT_TIME_LOCAL_TZ)
 		/* Adjust for local timezone */
