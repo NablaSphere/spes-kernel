@@ -279,6 +279,11 @@ void susfs_add_sus_path(void __user **user_info) {
 		goto out_copy_to_user;
 	}
 
+	if (!memchr(info.target_pathname, '\0', sizeof(info.target_pathname))) {
+		info.err = -EINVAL;
+		goto out_copy_to_user;
+	}
+
 	info.err = kern_path(info.target_pathname, LOOKUP_FOLLOW, &path);
 	if (info.err) {
 		SUSFS_LOGE("failed opening file '%s'\n", info.target_pathname);
@@ -326,6 +331,11 @@ void susfs_add_sus_path_loop(void __user **user_info) {
 
 	if (copy_from_user(&info, (struct st_susfs_sus_path __user*)*user_info, sizeof(info))) {
 		info.err = -EFAULT;
+		goto out_copy_to_user;
+	}
+
+	if (!memchr(info.target_pathname, '\0', sizeof(info.target_pathname))) {
+		info.err = -EINVAL;
 		goto out_copy_to_user;
 	}
 
@@ -1000,6 +1010,11 @@ void susfs_add_sus_kstat(void __user **user_info) {
 		goto out_copy_to_user;
 	}
 
+	if (!memchr(info.target_pathname, '\0', sizeof(info.target_pathname))) {
+		info.err = -EINVAL;
+		goto out_copy_to_user;
+	}
+
 	if (*info.target_pathname == '\0') {
 		info.err = -EINVAL;
 		goto out_copy_to_user;
@@ -1112,6 +1127,11 @@ void susfs_update_sus_kstat(void __user **user_info) {
 
 	if (copy_from_user(&info, (struct st_susfs_sus_kstat __user*)*user_info, sizeof(info))) {
 		info.err = -EFAULT;
+		goto out_copy_to_user;
+	}
+
+	if (!memchr(info.target_pathname, '\0', sizeof(info.target_pathname))) {
+		info.err = -EINVAL;
 		goto out_copy_to_user;
 	}
 
@@ -1368,6 +1388,12 @@ void susfs_set_uname(void __user **user_info) {
 		goto out_copy_to_user;
 	}
 
+	if (!memchr(info.release, '\0', sizeof(info.release)) ||
+	    !memchr(info.version, '\0', sizeof(info.version))) {
+		info.err = -EINVAL;
+		goto out_copy_to_user;
+	}
+
 	if (*info.release == '\0' || *info.version == '\0') {
 		info.err = -EFAULT;
 		goto out_copy_to_user;
@@ -1446,6 +1472,7 @@ static DEFINE_SEQLOCK(susfs_fake_cmdline_or_bootconfig_seqlock);
 
 void susfs_set_cmdline_or_bootconfig(void __user **user_info) {
 	struct st_susfs_spoof_cmdline_or_bootconfig *info = (struct st_susfs_spoof_cmdline_or_bootconfig *)kzalloc(sizeof(struct st_susfs_spoof_cmdline_or_bootconfig), GFP_KERNEL);
+	char *dst;
 	int err = 0;
 
 	if (!info) {
@@ -1461,23 +1488,34 @@ void susfs_set_cmdline_or_bootconfig(void __user **user_info) {
 		goto out_copy_to_user;
 	}
 
+	if (!memchr(info->fake_cmdline_or_bootconfig, '\0', sizeof(info->fake_cmdline_or_bootconfig))) {
+		info->err = -EINVAL;
+		goto out_copy_to_user;
+	}
+
 	if (*info->fake_cmdline_or_bootconfig == '\0') {
 		info->err = -EINVAL;
 		goto out_copy_to_user;
 	}
 
-	if (!fake_cmdline_or_bootconfig) {
-		fake_cmdline_or_bootconfig = (char *)kzalloc(SUSFS_FAKE_CMDLINE_OR_BOOTCONFIG_SIZE, GFP_KERNEL);
-		if (!fake_cmdline_or_bootconfig) {
+	dst = READ_ONCE(fake_cmdline_or_bootconfig);
+	if (!dst) {
+		char *new_buf = kzalloc(SUSFS_FAKE_CMDLINE_OR_BOOTCONFIG_SIZE, GFP_KERNEL);
+		if (!new_buf) {
 			info->err = -ENOMEM;
 			goto out_copy_to_user;
 		}
+		dst = cmpxchg(&fake_cmdline_or_bootconfig, NULL, new_buf);
+		if (dst)
+			kfree(new_buf);
+		else
+			dst = new_buf;
 	}
 
 	write_seqlock(&susfs_fake_cmdline_or_bootconfig_seqlock);
-	strscpy(fake_cmdline_or_bootconfig,
+	strscpy(dst,
 			info->fake_cmdline_or_bootconfig,
-			SUSFS_FAKE_CMDLINE_OR_BOOTCONFIG_SIZE - 1);
+			SUSFS_FAKE_CMDLINE_OR_BOOTCONFIG_SIZE);
 	write_sequnlock(&susfs_fake_cmdline_or_bootconfig_seqlock);
 
 	if (!static_key_enabled(&susfs_is_fake_cmdline_or_bootconfig_buffer_set))
@@ -1499,14 +1537,19 @@ out_copy_to_user:
 
 void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m) {
 	unsigned seq;
-	char *buf = (char *)kmalloc(SUSFS_FAKE_CMDLINE_OR_BOOTCONFIG_SIZE, GFP_KERNEL);
+	char *src = smp_load_acquire(&fake_cmdline_or_bootconfig);
+	char *buf;
 
+	if (unlikely(!src)) {
+		return;
+	}
+	buf = (char *)kmalloc(SUSFS_FAKE_CMDLINE_OR_BOOTCONFIG_SIZE, GFP_KERNEL);
 	if (!buf) {
 		return;
 	}
 	do {
 		seq = read_seqbegin(&susfs_fake_cmdline_or_bootconfig_seqlock);
-		strscpy(buf, fake_cmdline_or_bootconfig, SUSFS_FAKE_CMDLINE_OR_BOOTCONFIG_SIZE);
+		strscpy(buf, src, SUSFS_FAKE_CMDLINE_OR_BOOTCONFIG_SIZE);
 	} while (read_seqretry(&susfs_fake_cmdline_or_bootconfig_seqlock, seq));
 	seq_puts(m, buf);
 	kfree(buf);
@@ -1530,6 +1573,12 @@ void susfs_add_open_redirect(void __user **user_info) {
 
 	if (copy_from_user(&info, (struct st_susfs_open_redirect __user*)*user_info, sizeof(info))) {
 		info.err = -EFAULT;
+		goto out_copy_to_user;
+	}
+
+	if (!memchr(info.target_pathname, '\0', sizeof(info.target_pathname)) ||
+	    !memchr(info.redirected_pathname, '\0', sizeof(info.redirected_pathname))) {
+		info.err = -EINVAL;
 		goto out_copy_to_user;
 	}
 
@@ -1631,8 +1680,14 @@ void susfs_add_open_redirect(void __user **user_info) {
 	}
 
 	if (is_first_dup_found) {
-		hash_for_each_possible_safe(OPEN_REDIRECT_HLIST, tmp_entry_redirected, tmp_hlist_node, node, redirected_inode->i_ino) {
-			if (!strcmp(tmp_entry_redirected->info.target_pathname, info.redirected_pathname)) {
+		hash_for_each_possible_safe(OPEN_REDIRECT_HLIST, tmp_entry_redirected, tmp_hlist_node, node, tmp_entry_target->redirected_ino) {
+			if (tmp_entry_redirected->reversed_lookup_only &&
+			    tmp_entry_redirected->target_ino == tmp_entry_target->redirected_ino &&
+			    tmp_entry_redirected->target_dev == tmp_entry_target->redirected_dev &&
+			    tmp_entry_redirected->redirected_ino == tmp_entry_target->target_ino &&
+			    tmp_entry_redirected->redirected_dev == tmp_entry_target->target_dev &&
+			    !strcmp(tmp_entry_redirected->info.target_pathname, tmp_entry_target->info.redirected_pathname) &&
+			    !strcmp(tmp_entry_redirected->info.redirected_pathname, tmp_entry_target->info.target_pathname)) {
 				is_second_dup_found = true;
 				hash_del_rcu(&tmp_entry_redirected->node);
 				break;
@@ -1822,6 +1877,11 @@ void susfs_add_sus_map(void __user **user_info) {
 
 	if (copy_from_user(&info, (struct st_susfs_sus_map __user*)*user_info, sizeof(info))) {
 		info.err = -EFAULT;
+		goto out_copy_to_user;
+	}
+
+	if (!memchr(info.target_pathname, '\0', sizeof(info.target_pathname))) {
+		info.err = -EINVAL;
 		goto out_copy_to_user;
 	}
 
