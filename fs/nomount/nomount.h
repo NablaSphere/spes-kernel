@@ -56,12 +56,16 @@ struct nm_dir_ops {
     const struct inode_operations *orig_iop;
     const struct file_operations *orig_fop;
     struct nm_dir_node *dir_node;
-    const struct dentry_operations *orig_dops;
 
     struct inode_operations fake_iop;
     struct file_operations fake_fop;
-    struct dentry_operations fake_dops;
     struct rcu_head rcu;
+};
+
+struct nm_dops_wrap {
+    struct dentry_operations fake_dops;
+    const struct dentry_operations *orig;
+    struct list_head list;
 };
 
 struct nm_sop {
@@ -72,6 +76,8 @@ struct nm_sop {
     struct export_operations fake_export_op;
     const struct export_operations *orig_export_op;
     struct super_block *sb;
+    spinlock_t dops_lock;
+    struct list_head dops_list;
     struct rcu_head rcu;
     struct list_head list;
 };
@@ -456,15 +462,6 @@ static inline struct nm_sop *nm_get_nm_sop(const struct super_operations *sop) {
     if (likely(sop) && sop->put_super == nm_hijacked_put_super)
         return container_of(sop, struct nm_sop, fake_sop);
     return NULL;
-}
-
-#define NM_DOP_INITIALIZING ((const struct dentry_operations *)1L)
-static inline const struct dentry_operations *nm_get_orig_dops(struct nm_dir_ops *iop)
-{
-    const struct dentry_operations *dops;
-    if (!iop) return NULL;
-    dops = smp_load_acquire(&iop->orig_dops);
-    return (dops == NM_DOP_INITIALIZING) ? NULL : dops;
 }
 
 static inline int nm_call_orig_revalidate(const struct dentry_operations *dops, struct inode *parent_inode,
