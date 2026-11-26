@@ -4500,10 +4500,6 @@ int __access_remote_vm(struct task_struct *tsk, struct mm_struct *mm,
 	if (mmap_read_lock_killable(mm))
 		return 0;
 
-#ifdef CONFIG_KSU_SUSFS_SUS_MAP
-	vma = find_vma(mm, addr);
-#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
-
 	/* ignore errors, just check how much was successfully transferred */
 	while (len) {
 		int bytes, ret, offset;
@@ -4511,8 +4507,12 @@ int __access_remote_vm(struct task_struct *tsk, struct mm_struct *mm,
 		struct page *page = NULL;
 
 #ifdef CONFIG_KSU_SUSFS_SUS_MAP
-		if (vma && vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
-			break;
+		if (susfs_is_current_proc_umounted_app()) {
+			vma = find_vma(mm, addr);
+			if (vma && vma->vm_start <= addr && vma->vm_file &&
+			    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
+				break;
+		}
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
 
 		ret = get_user_pages_remote(tsk, mm, addr, 1,

@@ -1363,6 +1363,29 @@ static int add_to_pagemap(unsigned long addr, pagemap_entry_t *pme,
 	return 0;
 }
 
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+static inline bool susfs_is_vma_sus_map(struct vm_area_struct *vma)
+{
+	return vma && vma->vm_file &&
+		SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file));
+}
+
+static int susfs_pagemap_zero_range(unsigned long addr, unsigned long end,
+				    struct pagemapread *pm)
+{
+	pagemap_entry_t pme = make_pme(0, 0);
+	int err = 0;
+
+	for (; addr < end; addr += PAGE_SIZE) {
+		err = add_to_pagemap(addr, &pme, pm);
+		if (err)
+			break;
+	}
+	cond_resched();
+	return err;
+}
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+
 static int pagemap_pte_hole(unsigned long start, unsigned long end,
 				struct mm_walk *walk)
 {
@@ -1391,8 +1414,13 @@ static int pagemap_pte_hole(unsigned long start, unsigned long end,
 			break;
 
 		/* Addresses in the VMA. */
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+		if ((vma->vm_flags & VM_SOFTDIRTY) && !susfs_is_vma_sus_map(vma))
+			pme = make_pme(0, PM_SOFT_DIRTY);
+#else
 		if (vma->vm_flags & VM_SOFTDIRTY)
 			pme = make_pme(0, PM_SOFT_DIRTY);
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
 		for (; addr < min(end, vma->vm_end); addr += PAGE_SIZE) {
 			err = add_to_pagemap(addr, &pme, pm);
 			if (err)
@@ -1450,6 +1478,11 @@ static int pagemap_pmd_range(pmd_t *pmdp, unsigned long addr, unsigned long end,
 	spinlock_t *ptl;
 	pte_t *pte, *orig_pte;
 	int err = 0;
+
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+	if (susfs_is_vma_sus_map(vma))
+		return susfs_pagemap_zero_range(addr, end, pm);
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	ptl = pmd_trans_huge_lock(pmdp, vma);
@@ -1546,6 +1579,11 @@ static int pagemap_hugetlb_range(pte_t *ptep, unsigned long hmask,
 	int err = 0;
 	pte_t pte;
 
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+	if (susfs_is_vma_sus_map(vma))
+		return susfs_pagemap_zero_range(addr, end, pm);
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+
 	if (vma->vm_flags & VM_SOFTDIRTY)
 		flags |= PM_SOFT_DIRTY;
 
@@ -1618,9 +1656,6 @@ static ssize_t pagemap_read(struct file *file, char __user *buf,
 	unsigned long start_vaddr;
 	unsigned long end_vaddr;
 	int ret = 0, copied = 0;
-#ifdef CONFIG_KSU_SUSFS_SUS_MAP
-	struct vm_area_struct *vma;
-#endif
 
 	if (!mm || !mmget_not_zero(mm))
 		goto out;
@@ -1679,15 +1714,7 @@ static ssize_t pagemap_read(struct file *file, char __user *buf,
 		ret = mmap_read_lock_killable(mm);
 		if (ret)
 			goto out_free;
-#ifdef CONFIG_KSU_SUSFS_SUS_MAP
-		vma = find_vma(mm, start_vaddr);
-		if (vma && vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
-			goto bypass_orig_flow;
-#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
 		ret = walk_page_range(start_vaddr, end, &pagemap_walk);
-#ifdef CONFIG_KSU_SUSFS_SUS_MAP
-bypass_orig_flow:
-#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
 		mmap_read_unlock(mm);
 		start_vaddr = end;
 
