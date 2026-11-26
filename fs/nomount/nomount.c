@@ -4,6 +4,7 @@
 #include <linux/namei.h>
 #include <linux/cred.h>
 #include <linux/xattr.h>
+#include <linux/mount.h>
 #include <linux/module.h>
 #include "nomount.h"
 #ifdef CONFIG_KSU_SUSFS_SUS_PATH
@@ -111,7 +112,7 @@ static struct nm_leaf *nm_find_leaf_in_dir(struct nm_dir_node *dir_node, const c
 static bool nm_backing_gone(struct dentry *d)
 {
     struct inode *inode = READ_ONCE(d->d_inode);
-    return !inode || inode->i_nlink == 0;
+    return !inode || READ_ONCE(inode->i_nlink) == 0 || d_unlinked(d);
 }
 
 static bool nm_resolve_rule_from_leaf(struct nm_leaf *leaf, uid_t fsuid, struct nm_rule_info *out)
@@ -810,17 +811,29 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
     return pos;
 }
 
+#define NM_IOCB_COPY_MASK (IOCB_DSYNC | IOCB_SYNC | IOCB_APPEND | IOCB_NOWAIT | IOCB_NOIO | IOCB_DIRECT)
+
 static ssize_t nm_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
     struct file *file = iocb->ki_filp;
     struct file *real_file = file->private_data;
+    struct kiocb local_iocb;
     ssize_t ret;
-    if (!real_file || !real_file->f_op->read_iter) return -EINVAL;
-    if (unlikely(!is_sync_kiocb(iocb) && (iocb->ki_flags & IOCB_DIRECT))) return -EOPNOTSUPP;
 
-    iocb->ki_filp = real_file;
-    ret = real_file->f_op->read_iter(iocb, to);
-    iocb->ki_filp = file;
+    if (!real_file || !real_file->f_op || !real_file->f_op->read_iter) return -EINVAL;
+    if ((iocb->ki_flags & IOCB_NOWAIT) && !(real_file->f_mode & FMODE_NOWAIT)) return -EOPNOTSUPP;
+    if ((iocb->ki_flags & IOCB_DIRECT) &&
+        (!real_file->f_mapping->a_ops || !real_file->f_mapping->a_ops->direct_IO))
+        return -EINVAL;
+
+    init_sync_kiocb(&local_iocb, real_file);
+    local_iocb.ki_pos = iocb->ki_pos;
+    local_iocb.ki_hint = iocb->ki_hint;
+    local_iocb.ki_ioprio = iocb->ki_ioprio;
+    local_iocb.ki_flags |= (iocb->ki_flags & NM_IOCB_COPY_MASK);
+
+    ret = call_read_iter(real_file, &local_iocb, to);
+    iocb->ki_pos = local_iocb.ki_pos;
 
     return ret;
 }
@@ -829,13 +842,27 @@ static ssize_t nm_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
     struct file *file = iocb->ki_filp;
     struct file *real_file = file->private_data;
+    struct kiocb local_iocb;
+    bool diff_sb;
     ssize_t ret;
-    if (!real_file || !real_file->f_op->write_iter) return -EINVAL;
-    if (unlikely(!is_sync_kiocb(iocb) && (iocb->ki_flags & IOCB_DIRECT))) return -EOPNOTSUPP;
 
-    iocb->ki_filp = real_file;
-    ret = real_file->f_op->write_iter(iocb, from);
-    iocb->ki_filp = file;
+    if (!real_file || !real_file->f_op || !real_file->f_op->write_iter) return -EINVAL;
+    if ((iocb->ki_flags & IOCB_NOWAIT) && !(real_file->f_mode & FMODE_NOWAIT)) return -EOPNOTSUPP;
+    if ((iocb->ki_flags & IOCB_DIRECT) &&
+        (!real_file->f_mapping->a_ops || !real_file->f_mapping->a_ops->direct_IO))
+        return -EINVAL;
+
+    init_sync_kiocb(&local_iocb, real_file);
+    local_iocb.ki_pos = iocb->ki_pos;
+    local_iocb.ki_hint = iocb->ki_hint;
+    local_iocb.ki_ioprio = iocb->ki_ioprio;
+    local_iocb.ki_flags |= (iocb->ki_flags & NM_IOCB_COPY_MASK);
+
+    diff_sb = (file_inode(real_file)->i_sb != file_inode(file)->i_sb);
+    if (diff_sb) file_start_write(real_file);
+    ret = call_write_iter(real_file, &local_iocb, from);
+    if (diff_sb) file_end_write(real_file);
+    iocb->ki_pos = local_iocb.ki_pos;
     if (ret > 0) nm_sync_inode_size(file_inode(file), file_inode(real_file));
 
     return ret;
@@ -854,7 +881,27 @@ static inline void nm_clear_inode_private(struct inode *inode)
 
 static int nm_mmap(struct file *file, struct vm_area_struct *vma)
 {
-    int ret = generic_file_mmap(file, vma);
+    int ret;
+
+    if ((vma->vm_flags & VM_SHARED) && (vma->vm_flags & VM_MAYWRITE)) {
+        struct file *real_file = file->private_data;
+        if (!real_file) return -EINVAL;
+        if (!real_file->f_op || !real_file->f_op->mmap) return -ENODEV;
+        if (WARN_ON(file != vma->vm_file)) return -EIO;
+
+        vma->vm_file = get_file(real_file);
+        ret = call_mmap(vma->vm_file, vma);
+        if (ret) {
+            vma->vm_file = file;
+            fput(real_file);
+            return ret;
+        }
+        nm_clear_inode_private(file_inode(file));
+        fput(file);
+        return 0;
+    }
+
+    ret = generic_file_mmap(file, vma);
     if (!ret) nm_clear_inode_private(file_inode(file));
     return ret;
 }
@@ -956,19 +1003,44 @@ static int nm_getattr(IDMAP_ARG const struct path *path, struct kstat *stat, u32
     return res;
 }
 
+static inline int nm_want_write(struct super_block *v_sb, struct vfsmount *r_mnt)
+{
+    return (r_mnt->mnt_sb == v_sb) ? __mnt_want_write(r_mnt) : mnt_want_write(r_mnt);
+}
+
+static inline void nm_drop_write(struct super_block *v_sb, struct vfsmount *r_mnt)
+{
+    if (r_mnt->mnt_sb == v_sb)
+        __mnt_drop_write(r_mnt);
+    else
+        mnt_drop_write(r_mnt);
+}
+
 static int nm_setattr(IDMAP_ARG struct dentry *dentry, struct iattr *attr)
 {
     struct inode *v_inode = d_inode(dentry);
     struct nm_inode_info *info = v_inode->i_private;
     struct inode *r_inode;
+    struct iattr r_attr;
     int err;
 
     if (unlikely(!info)) return -EIO;
-    if (!info->r_path.dentry) return 0;
+    if (!info->r_path.dentry || !info->r_path.mnt) return 0;
+
+    err = nm_want_write(v_inode->i_sb, info->r_path.mnt);
+    if (err) return err;
+
+    r_attr = *attr;
+    if (r_attr.ia_valid & ATTR_FILE) {
+        if (r_attr.ia_file && r_attr.ia_file->private_data)
+            r_attr.ia_file = r_attr.ia_file->private_data;
+        else
+            r_attr.ia_valid &= ~ATTR_FILE;
+    }
 
     r_inode = d_backing_inode(info->r_path.dentry);
-    inode_lock(r_inode);
-    err = notify_change(IDMAP_CALL info->r_path.dentry, attr, NULL);
+    inode_lock_nested(r_inode, I_MUTEX_CHILD);
+    err = notify_change(IDMAP_CALL info->r_path.dentry, &r_attr, NULL);
     inode_unlock(r_inode);
 
     if (likely(!err)) {
@@ -978,6 +1050,7 @@ static int nm_setattr(IDMAP_ARG struct dentry *dentry, struct iattr *attr)
         if (attr->ia_valid & ATTR_GID)  v_inode->i_gid = r_inode->i_gid;
         nm_sync_inode_times(v_inode, r_inode);
     }
+    nm_drop_write(v_inode->i_sb, info->r_path.mnt);
     return err;
 }
 
@@ -1102,14 +1175,31 @@ static int nm_xattr_set(const struct xattr_handler *handler, IDMAP_ARG struct de
     struct nm_xattr_proxy *proxy = container_of(handler, struct nm_xattr_proxy, fake);
     if (nm_inode_is_virtual(inode)) {
         struct nm_inode_info *info = inode->i_private;
+        struct inode *r_inode, *delegated_inode = NULL;
         const char *full_name;
+        int err;
 
-        if (unlikely(!info || !info->r_path.dentry)) return -ENODATA;
-        if (sb_rdonly(d_backing_inode(info->r_path.dentry)->i_sb)) return -EROFS;
+        if (unlikely(!info || !info->r_path.dentry || !info->r_path.mnt)) return -ENODATA;
+        err = nm_want_write(inode->i_sb, info->r_path.mnt);
+        if (err) return err;
+
         full_name = xattr_full_name(handler, name);
+        r_inode = d_backing_inode(info->r_path.dentry);
+retry_deleg:
+        inode_lock_nested(r_inode, I_MUTEX_CHILD);
         if (buffer)
-            return vfs_setxattr(IDMAP_PATH(info->r_path) info->r_path.dentry, full_name, buffer, size, flags);
-        return vfs_removexattr(IDMAP_PATH(info->r_path) info->r_path.dentry, full_name);
+            err = __vfs_setxattr_locked(IDMAP_PATH(info->r_path) info->r_path.dentry, full_name, buffer, size, flags, &delegated_inode);
+        else
+            err = __vfs_removexattr_locked(IDMAP_PATH(info->r_path) info->r_path.dentry, full_name, &delegated_inode);
+        inode_unlock(r_inode);
+
+        if (delegated_inode) {
+            err = break_deleg_wait(&delegated_inode);
+            if (!err)
+                goto retry_deleg;
+        }
+        nm_drop_write(inode->i_sb, info->r_path.mnt);
+        return err;
     }
     return proxy->orig->set(proxy->orig, IDMAP_CALL dentry, inode, name, buffer, size, flags);
 }
@@ -2199,6 +2289,12 @@ static int nm_add_rule_locked(const char *v_path, const char *r_path, u16 v_len,
     if (fresh && IS_ERR((leaf = nm_alloc_leaf(v_path, v_len, hash)))) {
         err = PTR_ERR(leaf);
         goto out_rule;
+    }
+
+    if (!fresh && !(new_rule.flags & NM_FLAG_IS_DIR) &&
+        leaf->this_dir && rcu_access_pointer(leaf->this_dir->children)) {
+        err = -EISDIR;
+        goto out_leaf;
     }
 
     if (fresh && (new_rule.flags & NM_FLAG_IS_DIR))
