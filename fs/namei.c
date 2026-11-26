@@ -3400,7 +3400,6 @@ static int lookup_open(struct nameidata *nd, struct path *path,
 	umode_t mode = op->mode;
 	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
 #ifdef CONFIG_KSU_SUSFS_SUS_PATH
-	bool found_sus_path = false;
 	bool is_nd_state_open_last = (nd->state & ND_STATE_OPEN_LAST);
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 
@@ -3411,27 +3410,14 @@ static int lookup_open(struct nameidata *nd, struct path *path,
 	dentry = d_lookup(dir, &nd->last);
 #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 	if (is_nd_state_open_last && dentry && !IS_ERR(dentry) && dentry->d_inode &&
-		susfs_is_inode_sus_path(dentry->d_inode))
-	{
-		if (d_in_lookup(dentry))
-			d_lookup_done(dentry);
+		susfs_is_inode_sus_path(dentry->d_inode)) {
 		dput(dentry);
-		dentry = NULL;
-		found_sus_path = true;
+		return (op->open_flag & O_CREAT) ? (!got_write ? -EROFS : -EACCES) : -ENOENT;
 	}
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 	for (;;) {
 		if (!dentry) {
-#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-			if (found_sus_path) {
-				dentry = d_alloc_parallel(dir, &susfs_fake_qstr_name, &wq);
-				goto skip_orig_flow;
-			}
-#endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 			dentry = d_alloc_parallel(dir, &nd->last, &wq);
-#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-skip_orig_flow:
-#endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 			if (IS_ERR(dentry))
 				return PTR_ERR(dentry);
 		}
@@ -3448,6 +3434,12 @@ skip_orig_flow:
 		dentry = NULL;
 	}
 	if (dentry->d_inode) {
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+		if (is_nd_state_open_last && susfs_is_inode_sus_path(dentry->d_inode)) {
+			error = (op->open_flag & O_CREAT) ? (!got_write ? -EROFS : -EACCES) : -ENOENT;
+			goto out_dput;
+		}
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 		/* Cached positive dentry: will open in f_op->open */
 		goto out_no_open;
 	}
@@ -3492,6 +3484,18 @@ skip_orig_flow:
 				    mode);
 		if (unlikely(error == -ENOENT) && create_error)
 			error = create_error;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+		if (!error && is_nd_state_open_last) {
+			struct inode *a_inode = (file->f_mode & FMODE_OPENED) ?
+				file_inode(file) :
+				(path->dentry ? d_backing_inode(path->dentry) : NULL);
+			if (a_inode && susfs_is_inode_sus_path(a_inode)) {
+				if (!(file->f_mode & FMODE_OPENED) && path->dentry)
+					dput(path->dentry);
+				return (op->open_flag & O_CREAT) ? (!got_write ? -EROFS : -EACCES) : -ENOENT;
+			}
+		}
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 		return error;
 	}
 
@@ -3509,6 +3513,14 @@ no_open:
 			dentry = res;
 		}
 	}
+
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	if (is_nd_state_open_last && dentry->d_inode &&
+		susfs_is_inode_sus_path(dentry->d_inode)) {
+		error = (op->open_flag & O_CREAT) ? (!got_write ? -EROFS : -EACCES) : -ENOENT;
+		goto out_dput;
+	}
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 
 	/* Negative dentry, just create the file */
 	if (!dentry->d_inode && (open_flag & O_CREAT)) {
@@ -3787,7 +3799,7 @@ static int do_tmpfile(struct nameidata *nd, unsigned flags,
 			struct path fake_path;
 
 			/* filename_lookup() consumes fake_filename */
-			error = filename_lookup(old_dfd, fake_filename, flags | LOOKUP_DIRECTORY, &fake_path, NULL);
+			error = filename_lookup(old_dfd, fake_filename, (flags & ~LOOKUP_RCU) | LOOKUP_DIRECTORY, &fake_path, NULL);
 			path_put(&path);
 			if (unlikely(error))
 				return error;
@@ -3838,7 +3850,7 @@ static int do_o_path(struct nameidata *nd, unsigned flags, struct file *file)
 				struct path fake_path;
 
 				/* filename_lookup() consumes fake_filename */
-				error = filename_lookup(old_dfd, fake_filename, flags, &fake_path, NULL);
+				error = filename_lookup(old_dfd, fake_filename, flags & ~LOOKUP_RCU, &fake_path, NULL);
 				path_put(&path);
 				if (unlikely(error))
 					return error;
