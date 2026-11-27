@@ -182,14 +182,19 @@ struct fts_ts_data {
 	struct delayed_work prc_work;
 	struct work_struct resume_work;
 	struct work_struct suspend_work;
+#ifdef CONFIG_POWER_SUPPLY
+	struct work_struct charger_work;
+#endif
 	struct ftxxxx_proc proc;
 	spinlock_t irq_lock;
 	struct mutex report_mutex;
 	struct mutex bus_lock;
+	struct mutex charger_lock;
 	int irq;
 	int log_level;
 	int fw_is_running; /* confirm fw is running when using spi:default 0 */
 	int dummy_byte;
+	int charger_hw_state;
 #if defined(CONFIG_PM) && FTS_PATCH_COMERR_PM
 	struct completion pm_completion;
 	bool pm_suspend;
@@ -202,6 +207,10 @@ struct fts_ts_data {
 	bool glove_mode;
 	bool cover_mode;
 	bool charger_mode;
+	bool charger_suspended;
+#ifdef CONFIG_POWER_SUPPLY
+	bool psy_notif_registered;
+#endif
 	bool gesture_mode; /* gesture enable or disable, default: disable */
 	bool aod_changed;
 
@@ -226,6 +235,9 @@ struct fts_ts_data {
 #endif
 
 	struct notifier_block drm_notif;
+#ifdef CONFIG_POWER_SUPPLY
+	struct notifier_block psy_notif;
+#endif
 
 	int double_tap_pressed;
 	int single_tap_pressed;
@@ -309,6 +321,12 @@ void fts_tp_state_recovery(struct fts_ts_data *ts_data);
 int fts_ex_mode_init(struct fts_ts_data *ts_data);
 int fts_ex_mode_exit(struct fts_ts_data *ts_data);
 int fts_ex_mode_recovery(struct fts_ts_data *ts_data);
+void fts_ex_mode_suspend(struct fts_ts_data *ts_data);
+void fts_ex_mode_resume(struct fts_ts_data *ts_data);
+void fts_ex_mode_pm_suspend(struct fts_ts_data *ts_data);
+void fts_ex_mode_pm_resume(struct fts_ts_data *ts_data);
+void fts_ex_mode_fwupg_start(struct fts_ts_data *ts_data);
+void fts_ex_mode_fwupg_end(struct fts_ts_data *ts_data);
 int fts_flash_read(u32 addr, u8 *buf, u32 len);
 void fts_irq_disable(void);
 void fts_irq_enable(void);

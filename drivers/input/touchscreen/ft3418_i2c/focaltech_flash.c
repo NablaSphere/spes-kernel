@@ -1229,7 +1229,8 @@ int fts_upgrade_bin(char *fw_name, bool force)
 		return -EINVAL;
 	}
 
-	upg->ts_data->fw_loading = 1;
+	WRITE_ONCE(upg->ts_data->fw_loading, 1);
+	fts_ex_mode_fwupg_start(upg->ts_data);
 	fts_irq_disable();
 #if FTS_ESDCHECK_EN
 	fts_esdcheck_switch(DISABLE);
@@ -1277,7 +1278,8 @@ err_bin:
 	fts_esdcheck_switch(ENABLE);
 #endif
 	fts_irq_enable();
-	upg->ts_data->fw_loading = 0;
+	WRITE_ONCE(upg->ts_data->fw_loading, 0);
+	fts_ex_mode_fwupg_end(upg->ts_data);
 
 	if (fw_file_buf) {
 		vfree(fw_file_buf);
@@ -2077,7 +2079,8 @@ static void fts_fwupg_work(struct work_struct *work)
 		return;
 	}
 
-	upg->ts_data->fw_loading = 1;
+	WRITE_ONCE(upg->ts_data->fw_loading, 1);
+	fts_ex_mode_fwupg_start(upg->ts_data);
 	fts_irq_disable();
 #if FTS_ESDCHECK_EN
 	fts_esdcheck_switch(DISABLE);
@@ -2098,7 +2101,8 @@ static void fts_fwupg_work(struct work_struct *work)
 	fts_esdcheck_switch(ENABLE);
 #endif
 	fts_irq_enable();
-	upg->ts_data->fw_loading = 0;
+	WRITE_ONCE(upg->ts_data->fw_loading, 0);
+	fts_ex_mode_fwupg_end(upg->ts_data);
 }
 
 int fts_fwupg_init(struct fts_ts_data *ts_data)

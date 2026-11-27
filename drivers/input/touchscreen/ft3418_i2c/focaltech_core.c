@@ -1663,6 +1663,7 @@ static int fts_ts_probe_entry(struct fts_ts_data *ts_data)
 	spin_lock_init(&ts_data->irq_lock);
 	mutex_init(&ts_data->report_mutex);
 	mutex_init(&ts_data->bus_lock);
+	mutex_init(&ts_data->charger_lock);
 
 	/* Init communication interface */
 	ret = fts_bus_init(ts_data);
@@ -1883,6 +1884,7 @@ err_input_init:
 err_bus_init:
 	fts_bus_exit(ts_data);
 err_mutex_init:
+	mutex_destroy(&ts_data->charger_lock);
 	mutex_destroy(&ts_data->bus_lock);
 	mutex_destroy(&ts_data->report_mutex);
 err_pdata:
@@ -1944,6 +1946,7 @@ static int fts_ts_remove_entry(struct fts_ts_data *ts_data)
 	fts_input_exit(ts_data);
 	fts_bus_exit(ts_data);
 
+	mutex_destroy(&ts_data->charger_lock);
 	mutex_destroy(&ts_data->bus_lock);
 	mutex_destroy(&ts_data->report_mutex);
 	kfree_safe(ts_data->pdata);
@@ -2012,12 +2015,14 @@ static int fts_ts_suspend(struct device *dev)
 		return 0;
 	}
 
-	if (ts_data->fw_loading) {
+	if (READ_ONCE(ts_data->fw_loading)) {
 		mutex_unlock(&ts_data->bus_lock);
 		FTS_INFO("fw upgrade in process, can't suspend");
 		return 0;
 	}
 	mutex_unlock(&ts_data->bus_lock);
+
+	fts_ex_mode_suspend(ts_data);
 
 	FTS_DEBUG("Enter tp suspend");
 
@@ -2107,6 +2112,8 @@ static int fts_ts_resume(struct device *dev)
 	mutex_lock(&ts_data->bus_lock);
 	WRITE_ONCE(ts_data->suspended, false);
 	mutex_unlock(&ts_data->bus_lock);
+
+	fts_ex_mode_resume(ts_data);
 
 	fts_irq_enable();
 
@@ -2348,6 +2355,7 @@ static int fts_pm_suspend(struct device *dev)
 	WRITE_ONCE(ts_data->pm_suspend, true);
 	smp_wmb(); /* pairs with READ_ONCE(pm_suspend) in fts_irq_thread_handler */
 	reinit_completion(&ts_data->pm_completion);
+	fts_ex_mode_pm_suspend(ts_data);
 	return 0;
 }
 
@@ -2359,6 +2367,7 @@ static int fts_pm_resume(struct device *dev)
 	WRITE_ONCE(ts_data->pm_suspend, false);
 	smp_wmb(); /* pairs with READ_ONCE(pm_suspend) in fts_irq_thread_handler */
 	complete(&ts_data->pm_completion);
+	fts_ex_mode_pm_resume(ts_data);
 	return 0;
 }
 
