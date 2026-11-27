@@ -1498,6 +1498,31 @@ task_may_not_preempt(struct task_struct *task, int cpu)
 		 task_thread_info(task)->preempt_count & SOFTIRQ_MASK));
 }
 
+#ifdef CONFIG_UCLAMP_TASK
+static inline bool rt_task_fits_capacity(struct task_struct *p, int cpu)
+{
+	unsigned int min_cap;
+	unsigned int max_cap;
+	unsigned int cpu_cap;
+
+	/* Only heterogeneous systems can benefit from this check */
+	if (!static_branch_unlikely(&sched_asym_cpucapacity))
+		return true;
+
+	min_cap = uclamp_eff_value(p, UCLAMP_MIN);
+	max_cap = uclamp_eff_value(p, UCLAMP_MAX);
+
+	cpu_cap = capacity_orig_of(cpu);
+
+	return cpu_cap >= min(min_cap, max_cap);
+}
+#else
+static inline bool rt_task_fits_capacity(struct task_struct *p, int cpu)
+{
+	return true;
+}
+#endif
+
 static int
 select_task_rq_rt(struct task_struct *p, int cpu, int sd_flag, int flags,
 		  int sibling_count_hint)
@@ -1549,6 +1574,7 @@ select_task_rq_rt(struct task_struct *p, int cpu, int sd_flag, int flags,
 	 */
 	may_not_preempt = task_may_not_preempt(curr, cpu);
 	if (static_branch_unlikely(&sched_energy_present) || may_not_preempt ||
+	    !rt_task_fits_capacity(p, cpu) ||
 	    (unlikely(rt_task(curr)) &&
 	     (curr->nr_cpus_allowed < 2 ||
 	      curr->prio <= p->prio))) {
@@ -1890,7 +1916,8 @@ static int find_lowest_rq(struct task_struct *task)
 	if (task->nr_cpus_allowed == 1)
 		return -1; /* No other targets possible */
 
-	if (!cpupri_find(&task_rq(task)->rd->cpupri, task, lowest_mask))
+	if (!cpupri_find_fitness(&task_rq(task)->rd->cpupri, task, lowest_mask,
+				 rt_task_fits_capacity))
 		return -1; /* No targets found */
 
 	if (static_branch_unlikely(&sched_energy_present))
